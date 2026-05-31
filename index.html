@@ -1,0 +1,923 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kelbongoo – Prédiction Commandes Fournisseurs</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f7fa;color:#1a202c;line-height:1.5}
+  .container{max-width:1500px;margin:0 auto;padding:16px}
+  h1{font-size:22px;margin-bottom:4px;color:#2d3748}
+  .subtitle{color:#718096;font-size:13px;margin-bottom:16px}
+  .card{background:white;border-radius:8px;padding:18px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+  .btn{background:#3182ce;color:white;border:none;padding:10px 16px;border-radius:6px;cursor:pointer;font-size:14px;font-weight:500;transition:background .15s}
+  .btn:hover{background:#2c5aa0}
+  .btn:disabled{background:#cbd5e0;cursor:not-allowed}
+  .btn-secondary{background:#e2e8f0;color:#2d3748}
+  .btn-secondary:hover{background:#cbd5e0}
+  .btn-success{background:#38a169}
+  .btn-success:hover{background:#2f855a}
+  .btn-warn{background:#dd6b20}
+  .btn-warn:hover{background:#c05621}
+  .btn-sm{padding:6px 10px;font-size:12px}
+  input,select,textarea{font-family:inherit;font-size:14px;padding:8px 10px;border:1px solid #cbd5e0;border-radius:6px;width:100%}
+  input:focus,select:focus,textarea:focus{outline:none;border-color:#3182ce;box-shadow:0 0 0 3px rgba(49,130,206,.15)}
+  label{display:block;font-size:13px;font-weight:500;color:#4a5568;margin-bottom:4px}
+  .row{display:flex;gap:12px;flex-wrap:wrap}
+  .col{flex:1;min-width:200px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #e2e8f0;vertical-align:middle}
+  th{background:#f7fafc;font-weight:600;color:#4a5568;font-size:11px;text-transform:uppercase;letter-spacing:.3px}
+  tr:hover{background:#f7fafc}
+  .num{text-align:right;font-variant-numeric:tabular-nums}
+  .pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+  .pill-blue{background:#bee3f8;color:#2c5282}
+  .pill-green{background:#c6f6d5;color:#22543d}
+  .pill-orange{background:#feebc8;color:#7c2d12}
+  .pill-red{background:#fed7d7;color:#742a2a}
+  .pill-gray{background:#e2e8f0;color:#4a5568}
+  .scenario-box{border:2px solid transparent;border-radius:6px;padding:6px;cursor:pointer;transition:all .15s;text-align:center}
+  .scenario-box:hover{background:#edf2f7}
+  .scenario-box.selected{border-color:#3182ce;background:#ebf8ff}
+  .qty-input{width:60px!important;text-align:center;font-weight:600;font-size:14px}
+  .alert{padding:10px 14px;border-radius:6px;margin-bottom:12px;font-size:13px}
+  .alert-info{background:#bee3f8;color:#2c5282}
+  .alert-warn{background:#feebc8;color:#7c2d12}
+  .alert-error{background:#fed7d7;color:#742a2a}
+  .alert-success{background:#c6f6d5;color:#22543d}
+  .loader{display:inline-block;width:14px;height:14px;border:2px solid #cbd5e0;border-top-color:#3182ce;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .small{font-size:11px;color:#718096}
+  .step{font-weight:600;color:#3182ce;margin-bottom:10px;font-size:14px}
+  .badge{display:inline-block;padding:2px 6px;border-radius:4px;background:#edf2f7;font-size:11px;font-weight:500;color:#4a5568}
+  .tab-row{display:flex;gap:4px;border-bottom:2px solid #e2e8f0;margin-bottom:12px;overflow-x:auto}
+  .tab{padding:6px 12px;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-2px;font-size:13px;font-weight:500;color:#718096;white-space:nowrap}
+  .tab.active{color:#3182ce;border-bottom-color:#3182ce}
+  code{background:#edf2f7;padding:2px 6px;border-radius:3px;font-size:12px;font-family:'SF Mono',Menlo,monospace}
+  .data-status{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;margin-top:8px}
+  .data-status>div{display:flex;align-items:center;gap:6px}
+  .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+  .dot-ok{background:#38a169}.dot-err{background:#e53e3e}.dot-load{background:#dd6b20}
+  .config-panel{background:#fffaf0;border:1px solid #feebc8;padding:14px;border-radius:6px;margin-bottom:14px}
+  .qty-cell{min-width:75px}
+  .toolbar{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useMemo, useCallback, useRef } = React;
+
+const DEFAULT_APPS_SCRIPT_URL = localStorage.getItem('kbg_apps_script_url') || '';
+
+const fmtDate = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+const fmtFR = (d) => d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
+const todayStr = () => fmtDate(new Date());
+const normalizeName = (s) => (s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,'');
+const fuzzyMatch = (a,b) => { const na=normalizeName(a), nb=normalizeName(b); if(!na||!nb) return false; return na===nb||na.includes(nb)||nb.includes(na); };
+
+const callApi = async (url, action, params = {}) => {
+  if (!url) throw new Error("URL Apps Script non configurée");
+  if (action === 'init' || action === 'ping' || action === 'get_learnings') {
+    const r = await fetch(`${url}?action=${action}`, { method: 'GET', redirect: 'follow' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json();
+  }
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ action, ...params }),
+    redirect: 'follow',
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+};
+
+// ============================================================
+//                    MOTEUR DE PRÉDICTION
+// ============================================================
+const computeStats = (sales, today) => {
+  if (!sales || !sales.length) return { last7: 0, prev7: 0, avg4w: 0, days7: 0 };
+  const ms = 24 * 3600 * 1000;
+  const toDate = (s) => new Date(s + 'T00:00:00');
+  const start7 = new Date(today.getTime() - 7 * ms);
+  const start14 = new Date(today.getTime() - 14 * ms);
+  const start28 = new Date(today.getTime() - 28 * ms);
+  const inRange = (s, from, to) => { const d = toDate(s.d); return d > from && d <= to; };
+  const last7 = sales.filter(s => inRange(s, start7, today));
+  const prev7 = sales.filter(s => inRange(s, start14, start7));
+  const last28 = sales.filter(s => inRange(s, start28, today));
+  const sum = a => a.reduce((s, b) => s + b.q, 0);
+  return {
+    last7: sum(last7), prev7: sum(prev7),
+    avg4w: last28.length ? sum(last28) / 4 : 0,
+    days7: last7.length,
+  };
+};
+
+const computeAdjustment = (productId, learnings) => {
+  if (!learnings) return 1.0;
+  const entries = (learnings.entries || []).filter(e => e.productId === productId);
+  if (!entries.length) return 1.0;
+  const recent = entries.slice(-5);
+  const ratios = recent.map(e => {
+    const p = Number(e.proposedMedian) || 0;
+    const v = Number(e.validated) || 0;
+    return p > 0 ? v / p : 1;
+  });
+  return ratios.reduce((a, b) => a + b, 0) / ratios.length;
+};
+
+const buildScenarios = (stats, stock, daysToCover, pcb, adjCoef, losses) => {
+  const ratePerDistribDay = stats.days7 > 0 ? stats.last7 / stats.days7 : (stats.avg4w / 3.5);
+  const trend = stats.prev7 > 0 ? stats.last7 / stats.prev7 : 1;
+  const vsAvg = stats.avg4w > 0 ? stats.last7 / stats.avg4w : 1;
+  const distribDaysCovered = Math.max(1, Math.round(daysToCover * 0.5));
+  const baseNeed = ratePerDistribDay * distribDaysCovered;
+  const lossAdd = losses * (daysToCover / 7);
+  const prudent = baseNeed * 0.9 + lossAdd * 0.5;
+  const median  = baseNeed * 1.05 * adjCoef + lossAdd;
+  const large   = baseNeed * 1.25 * adjCoef + lossAdd * 1.2;
+  const need = q => Math.max(0, q - stock);
+  const roundPcb = q => pcb > 0 ? Math.ceil(q / pcb) * pcb : Math.ceil(q);
+  return {
+    ratePerDistribDay, trend, vsAvg, baseNeed, lossAdd,
+    scenarios: {
+      prudent: { target: Math.ceil(prudent), need: roundPcb(need(prudent)), label: 'Prudent' },
+      median:  { target: Math.ceil(median),  need: roundPcb(need(median)),  label: 'Médian' },
+      large:   { target: Math.ceil(large),   need: roundPcb(need(large)),   label: 'Large' },
+    }
+  };
+};
+
+const estimateDaysToCover = (cadEntry) => {
+  if (!cadEntry) return 7;
+  const jl = (cadEntry.jourLivraison || '').toLowerCase();
+  if (jl.includes('/') || jl.split(/livraison|pour/).length > 2) return 5;
+  return 7;
+};
+
+// ============================================================
+//                    COMPOSANTS
+// ============================================================
+function ConfigPanel({ apiUrl, setApiUrl, onReload }) {
+  const [val, setVal] = useState(apiUrl);
+  return (
+    <div className="config-panel">
+      <label>🔗 URL Apps Script Web App</label>
+      <div style={{display:'flex',gap:8,marginTop:6}}>
+        <input value={val} onChange={e => setVal(e.target.value)} placeholder="https://script.google.com/macros/s/.../exec"/>
+        <button className="btn btn-sm" onClick={() => {
+          setApiUrl(val);
+          localStorage.setItem('kbg_apps_script_url', val);
+          if (val) onReload && onReload();
+        }}>Enregistrer</button>
+      </div>
+      <div className="small" style={{marginTop:6}}>
+        Première utilisation : déploie le code <code>apps-script.gs</code> sur script.google.com (instructions dans README).
+      </div>
+    </div>
+  );
+}
+
+function Header({ step, dataStatus, stockDate }) {
+  const steps = ['Tableau de bord', 'Fournisseur', 'Prédiction', 'Validation', 'Export'];
+  return (
+    <div className="card">
+      <h1>🥦 Kelbongoo – Prédiction Commandes</h1>
+      <div className="subtitle">{fmtFR(new Date())}{stockDate && stockDate !== todayStr() && <span style={{color:'#dd6b20'}}> · ⚠️ Stock du {stockDate}</span>}</div>
+      <div className="data-status">
+        {Object.entries(dataStatus).map(([k, v]) => (
+          <div key={k}>
+            <span className={`dot ${v === 'ok' ? 'dot-ok' : v === 'err' ? 'dot-err' : 'dot-load'}`}></span>
+            <span>{k}</span>
+          </div>
+        ))}
+      </div>
+      <div className="tab-row" style={{marginTop:12,marginBottom:0}}>
+        {steps.map((s, i) => (
+          <div key={s} className={`tab ${i === step ? 'active' : ''}`}>{i + 1}. {s}</div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function StepDashboard({ apiUrl, data, onSelectSupplier, onSkipToList, onRefresh }) {
+  const [dashboard, setDashboard] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  
+  const load = useCallback(async () => {
+    setLoading(true); setError('');
+    try {
+      const r = await callApi(apiUrl, 'get_dashboard');
+      if (r.error) throw new Error(r.error);
+      setDashboard(r);
+    } catch (e) {
+      setError(e.message);
+    }
+    setLoading(false);
+  }, [apiUrl]);
+  
+  useEffect(() => { load(); }, [load]);
+  
+  // IMPORTANT : tous les hooks DOIVENT être appelés avant les returns conditionnels
+  const stockSuppliers = useMemo(() => {
+    const counts = {};
+    ((data.stock && data.stock.rows) || []).forEach(r => { counts[r.producteur] = (counts[r.producteur] || 0) + 1; });
+    return counts;
+  }, [data]);
+  
+  if (loading) return <div className="card"><span className="loader"/> Calcul du tableau de bord...</div>;
+  if (error) return <div className="card"><div className="alert alert-error">{error}</div>
+    <button className="btn" onClick={load}>Réessayer</button></div>;
+  if (!dashboard) return null;
+  
+  const { toOrder, weekOrders } = dashboard;
+  
+  const goToSupplier = (entry) => {
+    const stockName = entry.stockMatchKey || entry.supplier;
+    onSelectSupplier({
+      name: stockName,
+      count: stockSuppliers[stockName] || 0,
+      cad: {
+        producteur: entry.supplier,
+        jourLivraison: entry.jourLivraison,
+        deadline: entry.deadlineText,
+        franco: entry.franco,
+        mail: entry.mail,
+      },
+    });
+  };
+  
+  return (
+    <div>
+      <div className="card">
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+          <div className="step" style={{margin:0}}>📋 Commandes à passer</div>
+          <div>
+            <button className="btn btn-sm btn-secondary" onClick={onRefresh}>↻ Actualiser données</button>
+            <button className="btn btn-sm btn-secondary" style={{marginLeft:6}} onClick={onSkipToList}>Voir tous les fournisseurs →</button>
+          </div>
+        </div>
+        
+        {toOrder.length === 0 ? (
+          <div className="alert alert-info">Aucune commande détectée pour le moment. Vérifie que le cadencier est bien rempli.</div>
+        ) : (
+          <div style={{overflowX:'auto'}}>
+          <table>
+            <thead>
+              <tr>
+                <th>Fournisseur</th>
+                <th>Prochaine deadline</th>
+                <th>Livraison</th>
+                <th className="num">Stock</th>
+                <th className="num">Prév. ventes</th>
+                <th className="num">Manque</th>
+                <th>Dernière cde</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {toOrder.map(o => {
+                const dotClass = `dot dot-${o.urgency === 'red' ? 'err' : o.urgency === 'orange' ? 'load' : o.urgency === 'green' ? 'ok' : 'load'}`;
+                const lastOrderLabel = o.daysSinceLastOrder === null ? '—' :
+                  o.daysSinceLastOrder === 0 ? "aujourd'hui" :
+                  o.daysSinceLastOrder === 1 ? 'hier' :
+                  `il y a ${o.daysSinceLastOrder}j`;
+                return (
+                  <tr key={o.supplier}>
+                    <td>
+                      <span className={dotClass} style={{marginRight:6}}></span>
+                      <strong>{o.supplier}</strong>
+                      <div className="small">{o.productCount} produit{o.productCount > 1 ? 's' : ''} en stock</div>
+                    </td>
+                    <td>
+                      <strong>{o.nextDeadlineLabel}</strong>
+                      {o.daysUntilDeadline !== null && <div className="small">
+                        {o.daysUntilDeadline === 0 ? "aujourd'hui ⚠️" : 
+                         o.daysUntilDeadline === 1 ? 'demain' : 
+                         `dans ${o.daysUntilDeadline}j`}
+                      </div>}
+                    </td>
+                    <td className="small">{o.jourLivraison}</td>
+                    <td className="num">{o.totalStock}</td>
+                    <td className="num">{o.forecastSales}</td>
+                    <td className="num">
+                      {o.manque > 0 
+                        ? <span className="pill pill-red">{o.manque}</span>
+                        : <span className="pill pill-green">0</span>}
+                      {o.productsInDanger > 0 && <div className="small">{o.productsInDanger} produit{o.productsInDanger > 1 ? 's' : ''} en risque</div>}
+                    </td>
+                    <td className="small">
+                      {lastOrderLabel}
+                      {o.lastOrderStatus && o.lastOrderStatus !== 'draft' && (
+                        <div className="small">
+                          <span className="badge">{o.lastOrderStatus}</span>
+                        </div>
+                      )}
+                    </td>
+                    <td>
+                      <button className="btn btn-sm" disabled={o.productCount === 0} onClick={() => goToSupplier(o)}>
+                        Passer →
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          </div>
+        )}
+        
+        <div className="small" style={{marginTop:10}}>
+          {toOrder.filter(o => o.urgency === 'red').length} urgent · 
+          {' '}{toOrder.filter(o => o.urgency === 'orange').length} bientôt · 
+          {' '}{toOrder.filter(o => o.urgency === 'green').length} OK
+        </div>
+      </div>
+      
+      <div className="card">
+        <div className="step">✅ Commandes passées cette semaine</div>
+        {weekOrders.length === 0 ? (
+          <div className="alert alert-info">
+            Aucune commande enregistrée comme "passée" cette semaine.
+            <div className="small" style={{marginTop:6}}>Une commande devient "passée" quand tu cliques sur le bouton ✓ Commande passée à la fin du processus.</div>
+          </div>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Fournisseur</th>
+                <th className="num">Lignes</th>
+                <th className="num">Qté totale</th>
+                <th>Statut</th>
+                <th>Par</th>
+              </tr>
+            </thead>
+            <tbody>
+              {weekOrders.map(o => {
+                const d = new Date(o.date);
+                return (
+                  <tr key={o.orderId}>
+                    <td>{d.toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short' })}</td>
+                    <td><strong>{o.supplier}</strong></td>
+                    <td className="num">{o.lineCount}</td>
+                    <td className="num">{o.totalQty}</td>
+                    <td>
+                      <span className={`pill ${o.status === 'passed' ? 'pill-green' : 'pill-blue'}`}>
+                        {o.status === 'passed' ? 'Passée' : 'Envoyée'}
+                      </span>
+                    </td>
+                    <td className="small">{o.user || '—'}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function StepSupplier({ data, onSelect, onBack }) {
+  const [search, setSearch] = useState('');
+  const stockRows = (data.stock && data.stock.rows) || [];
+  const cad = data.cadencier || [];
+  const suppliers = useMemo(() => {
+    const counts = {};
+    stockRows.forEach(r => { counts[r.producteur] = (counts[r.producteur] || 0) + 1; });
+    return Object.entries(counts)
+      .map(([name, count]) => ({ name, count, cad: cad.find(c => fuzzyMatch(c.producteur, name)) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [stockRows, cad]);
+  const filtered = suppliers.filter(s => normalizeName(s.name).includes(normalizeName(search)));
+
+  return (
+    <div className="card">
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+        <div className="step" style={{margin:0}}>Étape 2 — Choisir le fournisseur</div>
+        <button className="btn btn-sm btn-secondary" onClick={onBack}>← Tableau de bord</button>
+      </div>
+      <input type="text" placeholder="Rechercher..." value={search} onChange={e => setSearch(e.target.value)} style={{marginBottom:12}}/>
+      <div style={{maxHeight:'60vh',overflowY:'auto'}}>
+        <table>
+          <thead>
+            <tr>
+              <th>Fournisseur</th>
+              <th className="num">Produits</th>
+              <th>Cadencier</th>
+              <th>Livraison</th>
+              <th>Deadline</th>
+              <th>Franco</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map(s => (
+              <tr key={s.name}>
+                <td><strong>{s.name}</strong></td>
+                <td className="num">{s.count}</td>
+                <td>{s.cad ? <span className="pill pill-green">✓</span> : <span className="pill pill-gray">—</span>}</td>
+                <td className="small">{s.cad?.jourLivraison || '—'}</td>
+                <td className="small">{s.cad?.deadline || '—'}</td>
+                <td className="small">{s.cad?.franco || '—'}</td>
+                <td><button className="btn btn-sm" onClick={() => onSelect(s)}>→</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="small" style={{marginTop:10}}>
+        {suppliers.length} fournisseurs · {suppliers.filter(s => s.cad).length} avec cadencier
+      </div>
+    </div>
+  );
+}
+
+function StepPrediction({ supplier, data, learnings, onValidate, onBack }) {
+  const today = useMemo(() => new Date(), []);
+  const [daysToCover, setDaysToCover] = useState(estimateDaysToCover(supplier.cad));
+  const [context, setContext] = useState('');
+  const [losses, setLosses] = useState({});
+  const [selectedScenario, setSelectedScenario] = useState({});
+  const [overrides, setOverrides] = useState({});
+  const [pcbOverrides, setPcbOverrides] = useState({});
+
+  const stockRows = (data.stock && data.stock.rows) || [];
+  const products = (data.products && data.products.products) || [];
+  const salesByProduct = (data.statsVentes && data.statsVentes.salesByProduct) || {};
+
+  const productsForSupplier = useMemo(() => {
+    return stockRows
+      .filter(r => r.producteur === supplier.name)
+      .map(stockItem => {
+        const info = products.find(p => p.id === stockItem.id) || {};
+        return {
+          ...stockItem,
+          paht: info.paht || 0,
+          pcb: info.pcb || 1,
+          ean: info.ean || '',
+          tva: info.tva || 5.5,
+        };
+      })
+      .sort((a, b) => a.produit.localeCompare(b.produit));
+  }, [stockRows, products, supplier]);
+
+  const productAnalyses = useMemo(() => {
+    return productsForSupplier.map(p => {
+      const sales = salesByProduct[p.id] || [];
+      const stats = computeStats(sales, today);
+      const pcb = pcbOverrides[p.id] || p.pcb || 1;
+      const adjCoef = computeAdjustment(p.id, learnings);
+      const loss = losses[p.id] || 0;
+      const r = buildScenarios(stats, p.stockFin, daysToCover, pcb, adjCoef, loss);
+      return { product: p, stats, ...r, pcb, adjCoef };
+    });
+  }, [productsForSupplier, salesByProduct, today, daysToCover, losses, pcbOverrides, learnings]);
+
+  useEffect(() => {
+    const def = {};
+    let changed = false;
+    productAnalyses.forEach(pa => {
+      if (!(pa.product.id in selectedScenario)) { def[pa.product.id] = 'median'; changed = true; }
+    });
+    if (changed) setSelectedScenario(prev => ({ ...prev, ...def }));
+  }, [productAnalyses.length]);
+
+  const getQty = (pa) => {
+    if (pa.product.id in overrides) return overrides[pa.product.id];
+    const scn = selectedScenario[pa.product.id] || 'median';
+    return pa.scenarios[scn].need;
+  };
+
+  const totalLines = productAnalyses.filter(pa => getQty(pa) > 0).length;
+  const totalAmount = productAnalyses.reduce((s, pa) => s + getQty(pa) * (pa.product.paht || 0), 0);
+  const franco = supplier.cad?.franco ? parseFloat(String(supplier.cad.franco).replace(/[^\d.,]/g,'').replace(',','.')) || 0 : 0;
+
+  return (
+    <div className="card">
+      <div className="step">Étape 3 — Prédiction pour {supplier.name}</div>
+      {supplier.cad && (
+        <div className="alert alert-info">
+          <strong>📅 {supplier.cad.jourLivraison || 'NC'}</strong>
+          {supplier.cad.deadline && <> · Deadline : <em>{supplier.cad.deadline}</em></>}
+          {supplier.cad.franco && <> · Franco : <em>{supplier.cad.franco}</em></>}
+          {supplier.cad.mail && <> · Mail : <code>{supplier.cad.mail}</code></>}
+        </div>
+      )}
+      <div className="row" style={{marginBottom:12}}>
+        <div className="col" style={{maxWidth:200}}>
+          <label>Jours à couvrir</label>
+          <input type="number" value={daysToCover} onChange={e => setDaysToCover(parseInt(e.target.value) || 7)} min="1" max="30"/>
+        </div>
+        <div className="col" style={{flex:3}}>
+          <label>💡 Contexte (météo, vacances, fériés...)</label>
+          <input value={context} onChange={e => setContext(e.target.value)} placeholder="ex: canicule prévue, lundi férié..."/>
+        </div>
+      </div>
+      <div style={{overflowX:'auto'}}>
+      <table>
+        <thead>
+          <tr>
+            <th>Produit</th>
+            <th className="num">Stock</th>
+            <th className="num">7j</th>
+            <th className="num">S-1</th>
+            <th className="num">Moy 4s</th>
+            <th>Pertes</th>
+            <th>PCB</th>
+            <th colSpan="3">Propositions (cliquer)</th>
+            <th>Final</th>
+            <th className="num">€ HT</th>
+          </tr>
+        </thead>
+        <tbody>
+          {productAnalyses.map(pa => {
+            const sel = selectedScenario[pa.product.id] || 'median';
+            const finalQty = getQty(pa);
+            const trendIcon = pa.trend > 1.15 ? '📈' : pa.trend < 0.85 ? '📉' : '→';
+            return (
+              <tr key={pa.product.id}>
+                <td>
+                  <strong>{pa.product.produit}</strong>
+                  <div className="small">{pa.product.unite}</div>
+                </td>
+                <td className="num"><strong>{pa.product.stockFin}</strong></td>
+                <td className="num">{pa.stats.last7}<div className="small">{pa.stats.days7}j {trendIcon}</div></td>
+                <td className="num small">{pa.stats.prev7}</td>
+                <td className="num small">{pa.stats.avg4w.toFixed(1)}</td>
+                <td>
+                  <input type="number" className="qty-input" value={losses[pa.product.id] || ''} placeholder="0"
+                    onChange={e => setLosses({...losses, [pa.product.id]: parseFloat(e.target.value) || 0})}/>
+                </td>
+                <td>
+                  <input type="number" className="qty-input" value={pcbOverrides[pa.product.id] || pa.product.pcb || 1}
+                    onChange={e => setPcbOverrides({...pcbOverrides, [pa.product.id]: parseInt(e.target.value) || 1})}/>
+                </td>
+                {['prudent', 'median', 'large'].map(scn => (
+                  <td key={scn} className="qty-cell">
+                    <div className={`scenario-box ${sel === scn ? 'selected' : ''}`}
+                      onClick={() => {
+                        setSelectedScenario({...selectedScenario, [pa.product.id]: scn});
+                        setOverrides(prev => { const n = {...prev}; delete n[pa.product.id]; return n; });
+                      }}>
+                      <span className="badge">{pa.scenarios[scn].label}</span>
+                      <div style={{fontSize:16,fontWeight:700,margin:'2px 0'}}>{pa.scenarios[scn].need}</div>
+                      <div className="small">cible: {pa.scenarios[scn].target}</div>
+                    </div>
+                  </td>
+                ))}
+                <td>
+                  <input type="number" className="qty-input" value={finalQty}
+                    onChange={e => setOverrides({...overrides, [pa.product.id]: parseInt(e.target.value) || 0})}/>
+                </td>
+                <td className="num small">{(finalQty * (pa.product.paht || 0)).toFixed(2)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      </div>
+      <div style={{marginTop:12,padding:12,background:'#f7fafc',borderRadius:6,display:'flex',justifyContent:'space-between',flexWrap:'wrap',gap:12}}>
+        <div>
+          <strong>{totalLines}</strong> lignes · Total : <strong>{totalAmount.toFixed(2)} € HT</strong>
+          {franco > 0 && (
+            <span style={{marginLeft:10}}>
+              {totalAmount >= franco 
+                ? <span className="pill pill-green">Franco atteint ({franco}€)</span>
+                : <span className="pill pill-orange">Manque {(franco - totalAmount).toFixed(2)}€</span>}
+            </span>
+          )}
+        </div>
+        <div>
+          <button className="btn btn-secondary" onClick={onBack}>← Retour</button>
+          <button className="btn btn-success" style={{marginLeft:8}}
+            onClick={() => onValidate(productAnalyses, selectedScenario, overrides, context, daysToCover)}>
+            Valider →
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StepValidate({ supplier, productAnalyses, selectedScenario, overrides, context, onBack, onConfirm }) {
+  const getQty = (pa) => {
+    if (pa.product.id in overrides) return overrides[pa.product.id];
+    const scn = selectedScenario[pa.product.id] || 'median';
+    return pa.scenarios[scn].need;
+  };
+  const lines = productAnalyses
+    .map(pa => ({
+      productId: pa.product.id,
+      produit: pa.product.produit,
+      qty: getQty(pa),
+      stock: pa.product.stockFin,
+      ventes7j: pa.stats.last7,
+      proposedMedian: pa.scenarios.median.need,
+      paht: pa.product.paht,
+      ean: pa.product.ean,
+      pcb: pa.pcb,
+      unite: pa.product.unite,
+    }))
+    .filter(l => l.qty > 0);
+  const total = lines.reduce((s, l) => s + l.qty * (l.paht || 0), 0);
+
+  return (
+    <div className="card">
+      <div className="step">Étape 4 — Validation finale</div>
+      <p style={{marginBottom:12}}>
+        <strong>{supplier.name}</strong> · {lines.length} lignes · <strong>{total.toFixed(2)} € HT</strong>
+        {context && <> · <em>{context}</em></>}
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Produit</th>
+            <th className="num">Stock</th>
+            <th className="num">Ventes 7j</th>
+            <th className="num">Proposé</th>
+            <th className="num">Validé</th>
+            <th className="num">Δ</th>
+            <th className="num">€ HT</th>
+          </tr>
+        </thead>
+        <tbody>
+          {lines.map(l => {
+            const delta = l.qty - l.proposedMedian;
+            return (
+              <tr key={l.productId}>
+                <td>{l.produit}</td>
+                <td className="num">{l.stock}</td>
+                <td className="num">{l.ventes7j}</td>
+                <td className="num">{l.proposedMedian}</td>
+                <td className="num"><strong>{l.qty}</strong></td>
+                <td className="num">
+                  {delta === 0 ? '=' : delta > 0 
+                    ? <span className="pill pill-orange">+{delta}</span> 
+                    : <span className="pill pill-blue">{delta}</span>}
+                </td>
+                <td className="num small">{(l.qty * l.paht).toFixed(2)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <div className="alert alert-warn" style={{marginTop:14}}>
+        ⚠️ J'enregistre tes ajustements dans le sheet d'apprentissage partagé pour améliorer mes prochaines prédictions.
+      </div>
+      <div style={{marginTop:14,display:'flex',justifyContent:'space-between'}}>
+        <button className="btn btn-secondary" onClick={onBack}>← Modifier</button>
+        <button className="btn btn-success" onClick={() => onConfirm(lines)}>✓ Valider et générer</button>
+      </div>
+    </div>
+  );
+}
+
+function StepExport({ apiUrl, supplier, lines, context, onBack, onReset }) {
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState('');
+  const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const [orderId, setOrderId] = useState(null);
+  const [marking, setMarking] = useState(false);
+  const [marked, setMarked] = useState(false);
+
+  const txtContent = lines.map(l => `${l.ean || l.productId}\t${l.qty}`).join('\n');
+  const totalAmount = lines.reduce((s, l) => s + l.qty * (l.paht || 0), 0);
+
+  useEffect(() => {
+    if (saved) return;
+    callApi(apiUrl, 'save_validation', {
+      supplier: supplier.name,
+      context: context || '',
+      userName: 'Henry',
+      lines: lines.map(l => ({
+        productId: l.productId, produit: l.produit, stock: l.stock,
+        ventes7j: l.ventes7j, proposedMedian: l.proposedMedian, validated: l.qty,
+      }))
+    }).then(r => {
+      if (r.error) setSaveError(r.error); 
+      else { setSaved(true); if (r.orderId) setOrderId(r.orderId); }
+    }).catch(e => setSaveError(e.message));
+  }, []);
+
+  const downloadTxt = () => {
+    const blob = new Blob([txtContent], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `commande_${normalizeName(supplier.name)}_${todayStr()}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadXlsx = () => {
+    const wb = XLSX.utils.book_new();
+    const data = [
+      ['GENCODE', 'CODE', 'Produits', 'Unité', 'PCB', 'CDE en UVC', 'Unité fact', 'PA HT', 'Montant HT'],
+      ...lines.map(l => [
+        l.ean || '', l.productId, l.produit, l.unite || '', l.pcb || 1,
+        l.qty, 'pièce', l.paht ? l.paht.toFixed(2) : '',
+        l.paht ? (l.paht * l.qty).toFixed(2) : ''
+      ]),
+      ['', '', '', '', '', '', '', 'Total HT', totalAmount.toFixed(2)]
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(data);
+    XLSX.utils.book_append_sheet(wb, ws, supplier.name.substring(0, 28));
+    XLSX.writeFile(wb, `BdC_${normalizeName(supplier.name)}_${todayStr()}.xlsx`);
+  };
+
+  const sendMail = async () => {
+    setSending(true); setError('');
+    try {
+      const body = 
+`Commande pour ${supplier.name}
+Date : ${todayStr()}
+Nombre de lignes : ${lines.length}
+Total estimé : ${totalAmount.toFixed(2)} € HT
+${context ? '\nContexte : ' + context : ''}
+
+Fichier .txt joint à importer dans G5.
+`;
+      const r = await callApi(apiUrl, 'send_order_mail', {
+        to: 'rr@probon.org',
+        subject: `Commande fournisseur ${supplier.name} - ${todayStr()}`,
+        body,
+        attachmentName: `commande_${normalizeName(supplier.name)}_${todayStr()}.txt`,
+        attachmentContent: txtContent,
+      });
+      if (r.error) throw new Error(r.error);
+      setSent(true);
+      // Marquer auto comme "sent" (envoyée, pas encore validée comme passée)
+      if (orderId) {
+        await callApi(apiUrl, 'mark_as_sent', { orderId, status: 'sent' });
+      }
+    } catch (e) {
+      setError(`Erreur envoi : ${e.message}. Tu peux télécharger le .txt et l'envoyer manuellement.`);
+    }
+    setSending(false);
+  };
+
+  const markAsPassed = async () => {
+    if (!orderId) { setError('Pas d\'orderId, recharge la page.'); return; }
+    setMarking(true);
+    try {
+      const r = await callApi(apiUrl, 'mark_as_sent', { orderId, status: 'passed' });
+      if (r.error) throw new Error(r.error);
+      setMarked(true);
+    } catch (e) {
+      setError(`Erreur : ${e.message}`);
+    }
+    setMarking(false);
+  };
+
+  return (
+    <div className="card">
+      <div className="step">Étape 5 — Export & envoi</div>
+      <div className="alert alert-success">
+        ✓ Commande prête pour <strong>{supplier.name}</strong> — {lines.length} lignes — {totalAmount.toFixed(2)} € HT
+        {saved && <span style={{marginLeft:10}} className="pill pill-green">Apprentissage enregistré</span>}
+        {saveError && <span style={{marginLeft:10}} className="pill pill-red">Apprentissage : {saveError}</span>}
+      </div>
+      <h3 style={{marginBottom:8,marginTop:14,fontSize:14}}>📄 Fichier .txt (à importer dans G5)</h3>
+      <textarea readOnly value={txtContent} style={{fontFamily:'monospace',fontSize:12,minHeight:120}}/>
+      <div className="toolbar" style={{marginTop:12}}>
+        <button className="btn" onClick={downloadTxt}>⬇ .txt</button>
+        <button className="btn btn-secondary" onClick={downloadXlsx}>⬇ BDC .xlsx</button>
+        <button className="btn btn-warn" onClick={sendMail} disabled={sending || sent}>
+          {sending ? <><span className="loader"/> Envoi...</> : sent ? '✓ Mail envoyé' : '📧 Envoyer à rr@probon.org'}
+        </button>
+      </div>
+      {error && <div className="alert alert-error" style={{marginTop:12}}>{error}</div>}
+      
+      <div style={{marginTop:18,padding:14,background:'#f0fff4',border:'1px solid #c6f6d5',borderRadius:6}}>
+        <strong>Une fois la commande effectivement passée au fournisseur :</strong>
+        <div className="small" style={{marginBottom:8}}>Clique sur le bouton ci-dessous pour la marquer comme "passée" dans le tableau de bord.</div>
+        <button className="btn btn-success" onClick={markAsPassed} disabled={!orderId || marking || marked}>
+          {marking ? <><span className="loader"/> Enregistrement...</> : marked ? '✓ Marquée comme passée' : '✓ Commande passée au fournisseur'}
+        </button>
+      </div>
+      
+      <div style={{marginTop:18,display:'flex',justifyContent:'space-between'}}>
+        <button className="btn btn-secondary" onClick={onBack}>← Retour</button>
+        <button className="btn" onClick={onReset}>↻ Tableau de bord</button>
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [apiUrl, setApiUrl] = useState(DEFAULT_APPS_SCRIPT_URL);
+  const [data, setData] = useState(null);
+  const [learnings, setLearnings] = useState({ entries: [] });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [step, setStep] = useState(0);
+  const [supplier, setSupplier] = useState(null);
+  const [productAnalyses, setProductAnalyses] = useState(null);
+  const [selectedScenario, setSelectedScenario] = useState({});
+  const [overrides, setOverrides] = useState({});
+  const [context, setContext] = useState('');
+  const [finalLines, setFinalLines] = useState(null);
+
+  const dataStatus = useMemo(() => {
+    if (!data) return { Cadencier: 'load', Stats: 'load', Produits: 'load', Stock: 'load' };
+    return {
+      Cadencier: data.cadencier?.length > 0 ? 'ok' : 'err',
+      Stats: data.statsVentes?.products?.length > 0 ? 'ok' : 'err',
+      Produits: data.products?.products?.length > 0 ? 'ok' : 'err',
+      Stock: data.stock?.rows?.length > 0 ? 'ok' : 'err',
+    };
+  }, [data]);
+
+  const loadAll = useCallback(async () => {
+    if (!apiUrl) return;
+    setLoading(true); setError('');
+    try {
+      const [init, learn] = await Promise.all([
+        callApi(apiUrl, 'init'),
+        callApi(apiUrl, 'get_learnings').catch(() => ({ entries: [] })),
+      ]);
+      if (init.error) throw new Error(init.error);
+      setData(init);
+      setLearnings(learn);
+    } catch (e) {
+      setError(`Chargement impossible : ${e.message}`);
+    }
+    setLoading(false);
+  }, [apiUrl]);
+
+  useEffect(() => { if (apiUrl) loadAll(); }, [apiUrl]);
+
+  const reset = () => {
+    setStep(0); setSupplier(null); setProductAnalyses(null);
+    setSelectedScenario({}); setOverrides({}); setFinalLines(null); setContext('');
+  };
+
+  return (
+    <div className="container">
+      <Header step={step} dataStatus={dataStatus} stockDate={data?.stock?.date}/>
+      <ConfigPanel apiUrl={apiUrl} setApiUrl={setApiUrl} onReload={loadAll}/>
+      {loading && <div className="card"><span className="loader"/> Chargement des données depuis le Drive...</div>}
+      {error && <div className="card"><div className="alert alert-error">{error}</div>
+        <button className="btn" onClick={loadAll}>Réessayer</button>
+      </div>}
+      {data && !loading && (
+        <>
+          {step === 0 && (
+            <StepDashboard 
+              apiUrl={apiUrl} data={data}
+              onSelectSupplier={(s) => { setSupplier(s); setStep(2); }}
+              onSkipToList={() => setStep(1)}
+              onRefresh={loadAll}
+            />
+          )}
+          {step === 1 && (
+            <StepSupplier data={data} 
+              onSelect={(s) => { setSupplier(s); setStep(2); }}
+              onBack={() => setStep(0)}/>
+          )}
+          {step === 2 && supplier && (
+            <StepPrediction supplier={supplier} data={data} learnings={learnings}
+              onValidate={(pa, sel, ovr, ctx) => {
+                setProductAnalyses(pa); setSelectedScenario(sel); setOverrides(ovr);
+                setContext(ctx); setStep(3);
+              }}
+              onBack={() => setStep(1)}/>
+          )}
+          {step === 3 && productAnalyses && (
+            <StepValidate supplier={supplier} productAnalyses={productAnalyses}
+              selectedScenario={selectedScenario} overrides={overrides} context={context}
+              onConfirm={(lines) => { setFinalLines(lines); setStep(4); }}
+              onBack={() => setStep(2)}/>
+          )}
+          {step === 4 && finalLines && (
+            <StepExport apiUrl={apiUrl} supplier={supplier} lines={finalLines} context={context}
+              onBack={() => setStep(3)} onReset={reset}/>
+          )}
+        </>
+      )}
+      <div style={{textAlign:'center',marginTop:20,color:'#a0aec0',fontSize:11}}>
+        Kelbongoo Commandes v3 · {data?.stock?.date && `Stock du ${data.stock.date}`} · 
+        {learnings?.entries?.length || 0} validations en apprentissage
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
