@@ -408,14 +408,19 @@ function StepDashboard({ apiUrl, data, onSelectSupplier, onSkipToList, onRefresh
   const load = useCallback(async () => {
     setLoading(true); setError('');
     try {
-      const r = await callApi(apiUrl, 'get_dashboard');
-      if (r.error) throw new Error(r.error);
-      setDashboard(r);
+      // Si init_light a déjà inclus le dashboard, on l'utilise directement
+      if (data && data.dashboard) {
+        setDashboard(data.dashboard);
+      } else {
+        const r = await callApi(apiUrl, 'get_dashboard');
+        if (r.error) throw new Error(r.error);
+        setDashboard(r);
+      }
     } catch (e) {
       setError(e.message);
     }
     setLoading(false);
-  }, [apiUrl]);
+  }, [apiUrl, data]);
   
   useEffect(() => { load(); }, [load]);
   
@@ -672,6 +677,10 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
   const [bdcLoading, setBdcLoading] = useState(true);
   const [bdcError, setBdcError] = useState('');
   
+  // Chargement lazy des stats du fournisseur (init_light n'envoie pas les ventes détaillées)
+  const [supplierStats, setSupplierStats] = useState(null);
+  const [statsLoading, setStatsLoading] = useState(true);
+  
   useEffect(() => {
     setBdcLoading(true);
     setBdcError('');
@@ -687,10 +696,30 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
       .catch(e => setBdcError(e.message))
       .finally(() => setBdcLoading(false));
   }, [apiUrl, supplier.name]);
+  
+  // Charger les stats détaillées du fournisseur en parallèle
+  useEffect(() => {
+    // Si data.statsVentes a déjà salesByProduct (mode init full), pas besoin de re-fetch
+    if (data.statsVentes && data.statsVentes.salesByProduct && Object.keys(data.statsVentes.salesByProduct).length > 0) {
+      setSupplierStats({ salesByProduct: data.statsVentes.salesByProduct });
+      setStatsLoading(false);
+      return;
+    }
+    // Sinon (mode init_light) : charger spécifiquement pour ce fournisseur
+    setStatsLoading(true);
+    callApi(apiUrl, 'get_supplier_stats', { supplier: supplier.name })
+      .then(r => {
+        setSupplierStats(r);
+      })
+      .catch(e => {
+        setSupplierStats({ salesByProduct: {}, error: e.message });
+      })
+      .finally(() => setStatsLoading(false));
+  }, [apiUrl, supplier.name, data]);
 
   const stockRows = (data.stock && data.stock.rows) || [];
   const products = (data.products && data.products.products) || [];
-  const salesByProduct = (data.statsVentes && data.statsVentes.salesByProduct) || {};
+  const salesByProduct = (supplierStats && supplierStats.salesByProduct) || {};
 
   // Construire un map normalisé pour matching produit ↔ BDC
   const bdcByNormName = useMemo(() => {
@@ -770,6 +799,7 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
         </div>
       )}
       {bdcLoading && <div className="alert alert-info"><span className="loader"/> Chargement du BDC fournisseur...</div>}
+      {statsLoading && <div className="alert alert-info"><span className="loader"/> Chargement des ventes du fournisseur...</div>}
       {bdcError && (
         <div className="alert alert-warn">
           ⚠️ BDC non disponible : {bdcError}
@@ -1200,6 +1230,89 @@ Fichier .txt joint à importer dans G5.
   );
 }
 
+function BdcAlertBanner({ bdcCheck }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!bdcCheck) return null;
+  const hasDuplicates = bdcCheck.duplicatesCount > 0;
+  const hasIgnored = bdcCheck.ignoredCount > 0;
+  if (!hasDuplicates && !hasIgnored) return null; // Tout est OK, pas d'alerte
+  
+  return (
+    <div style={{
+      background: hasDuplicates ? '#FEB2B2' : '#FAF089',
+      color: '#742A2A',
+      border: '2px solid ' + (hasDuplicates ? '#C53030' : '#D69E2E'),
+      borderRadius: 6,
+      padding: '10px 14px',
+      marginBottom: 10,
+      fontSize: 13,
+    }}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',cursor:'pointer'}}
+        onClick={() => setExpanded(!expanded)}>
+        <div>
+          <strong>{hasDuplicates ? '🚨 DOUBLON(S) DE BDC DÉTECTÉ(S)' : '⚠️ Anomalies BDC'}</strong>
+          {' '}— {bdcCheck.validCount} BDC valides
+          {hasDuplicates && <> · <span style={{color:'#9B2C2C',fontWeight:600}}>{bdcCheck.duplicatesCount} doublon{bdcCheck.duplicatesCount > 1 ? 's' : ''}</span></>}
+          {hasIgnored && <> · {bdcCheck.ignoredCount} fichier{bdcCheck.ignoredCount > 1 ? 's' : ''} ignoré{bdcCheck.ignoredCount > 1 ? 's' : ''}</>}
+        </div>
+        <span style={{fontSize:11}}>{expanded ? '▲ Réduire' : '▼ Détails'}</span>
+      </div>
+      
+      {expanded && (
+        <div style={{marginTop:10,paddingTop:10,borderTop:'1px solid rgba(116,42,42,.3)'}}>
+          {hasDuplicates && (
+            <div style={{marginBottom:12}}>
+              <strong style={{fontSize:12}}>🚨 Doublons (à résoudre en priorité) :</strong>
+              {bdcCheck.duplicates.map((d, i) => (
+                <div key={i} style={{marginTop:6,marginLeft:8}}>
+                  <div><strong>Fournisseur "{d.supplier}"</strong> matche {d.files.length} BDC :</div>
+                  <ul style={{marginTop:3,marginBottom:0,paddingLeft:20}}>
+                    {d.files.map((f, j) => (
+                      <li key={j} style={{fontSize:12}}>
+                        <a href={f.url} target="_blank" rel="noopener" style={{color:'#9B2C2C'}}>{f.name}</a>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+              <div style={{marginTop:6,fontSize:11,fontStyle:'italic'}}>
+                💡 Renommer l'un des BDC pour qu'il ne contienne plus de mot en commun avec ce fournisseur, OU supprimer l'inutile.
+              </div>
+            </div>
+          )}
+          
+          {hasIgnored && (
+            <details>
+              <summary style={{cursor:'pointer',fontSize:12,fontWeight:600}}>
+                🚫 Fichiers ignorés ({bdcCheck.ignoredCount})
+              </summary>
+              <ul style={{marginTop:6,marginBottom:0,paddingLeft:20,fontSize:11}}>
+                {bdcCheck.ignoredFiles.map((f, i) => (
+                  <li key={i}>{f.name} <span style={{color:'#9B2C2C',fontStyle:'italic'}}>→ {f.reason}</span></li>
+                ))}
+              </ul>
+              <div style={{marginTop:6,fontSize:11,fontStyle:'italic'}}>
+                Pour qu'un fichier soit utilisé : nom commence par "BDC" + format Google Sheet natif (pas .xlsx ni raccourci).
+              </div>
+            </details>
+          )}
+          
+          {bdcCheck.missingCount > 0 && (
+            <details style={{marginTop:8}}>
+              <summary style={{cursor:'pointer',fontSize:12,fontWeight:600}}>
+                ❓ Fournisseurs du cadencier sans BDC ({bdcCheck.missingCount})
+              </summary>
+              <div style={{marginTop:4,fontSize:11}}>
+                {bdcCheck.missing.join(', ')}
+              </div>
+            </details>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const [apiUrl, setApiUrl] = useState(DEFAULT_APPS_SCRIPT_URL);
   const [configExpanded, setConfigExpanded] = useState(!DEFAULT_APPS_SCRIPT_URL); // ouvert si pas d'URL
@@ -1243,7 +1356,7 @@ function App() {
     setError('');
     try {
       const [init, learn] = await Promise.all([
-        callApi(apiUrl, 'init'),
+        callApi(apiUrl, 'init_light'),
         callApi(apiUrl, 'get_learnings').catch(() => ({ entries: [] })),
       ]);
       if (init.error) throw new Error(init.error);
@@ -1283,6 +1396,7 @@ function App() {
       <Header step={step} dataStatus={dataStatus} stockDate={data?.stock?.date}/>
       <ConfigPanel apiUrl={apiUrl} setApiUrl={setApiUrl} onReload={loadAll} 
         expanded={configExpanded} setExpanded={setConfigExpanded}/>
+      <BdcAlertBanner bdcCheck={data?.bdcCheck}/>
       {refreshing && (
         <div style={{fontSize:11,color:'#718096',textAlign:'center',marginBottom:8}}>
           <span className="loader" style={{width:10,height:10}}/> Actualisation en arrière-plan...
