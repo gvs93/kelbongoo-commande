@@ -1339,14 +1339,22 @@ function App() {
     };
   }, [data]);
 
+  const [lastLoadMs, setLastLoadMs] = useState(null);
+  const [cacheAge, setCacheAge] = useState(null);
+
   // Charger depuis localStorage AU DÉMARRAGE pour affichage instantané
   useEffect(() => {
     if (!apiUrl) return;
     try {
       const cached = localStorage.getItem('kbg_cache_data_v1');
       const cachedLearn = localStorage.getItem('kbg_cache_learnings_v1');
+      const cachedTime = localStorage.getItem('kbg_cache_time_v1');
       if (cached) setData(JSON.parse(cached));
       if (cachedLearn) setLearnings(JSON.parse(cachedLearn));
+      if (cachedTime) {
+        const age = Date.now() - parseInt(cachedTime, 10);
+        setCacheAge(age);
+      }
     } catch (_) {}
   }, []);
 
@@ -1354,15 +1362,22 @@ function App() {
     if (!apiUrl) return;
     if (silent) setRefreshing(true); else setLoading(true);
     setError('');
+    const startTime = Date.now();
     try {
       const [init, learn] = await Promise.all([
         callApi(apiUrl, 'init_light'),
         callApi(apiUrl, 'get_learnings').catch(() => ({ entries: [] })),
       ]);
       if (init.error) throw new Error(init.error);
+      const duration = Date.now() - startTime;
+      setLastLoadMs(duration);
+      setCacheAge(0);
+      // Log timing dans la console pour debug
+      console.log(`[Kelbongoo] Chargement init_light en ${duration}ms`, 
+        init._cached ? '(depuis cache Apps Script)' : '(calcul complet)',
+        init._timings ? `· timings serveur: ${JSON.stringify(init._timings)}` : '');
       setData(init);
       setLearnings(learn);
-      // Sauvegarder dans localStorage pour la prochaine fois
       try {
         localStorage.setItem('kbg_cache_data_v1', JSON.stringify(init));
         localStorage.setItem('kbg_cache_learnings_v1', JSON.stringify(learn));
@@ -1442,8 +1457,14 @@ function App() {
         </>
       )}
       <div style={{textAlign:'center',marginTop:20,color:'#a0aec0',fontSize:11}}>
-        Kelbongoo Commandes v3 · {data?.stock?.date && `Stock du ${data.stock.date}`} · 
+        Kelbongoo Commandes v4 · {data?.stock?.date && `Stock du ${data.stock.date}`} · 
         {learnings?.entries?.length || 0} validations en apprentissage
+        {lastLoadMs !== null && (
+          <span> · Dernier chargement : <strong>{(lastLoadMs / 1000).toFixed(1)}s</strong>
+            {data?._cached && ' (cache serveur)'}
+            {data?._timings && data._timings.from_cache && ' (cache serveur)'}
+          </span>
+        )}
       </div>
     </div>
   );
