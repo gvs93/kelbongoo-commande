@@ -120,7 +120,7 @@ const callApi = async (url, action, params = {}) => {
 //                    MOTEUR DE PRÉDICTION
 // ============================================================
 const computeStats = (sales, today, periodDays) => {
-  if (!sales || !sales.length) return { current: 0, prev: 0, avg4: 0, daysCur: 0, periodDays: periodDays };
+  if (!sales || !sales.length) return { current: 0, prev: 0, avg4: 0, ref: 0, refSource: 'none', daysCur: 0, periodDays: periodDays };
   const N = periodDays || 7;
   const ms = 24 * 3600 * 1000;
   const toDate = (s) => new Date(s + 'T00:00:00');
@@ -132,10 +132,21 @@ const computeStats = (sales, today, periodDays) => {
   const prev = sales.filter(s => inRange(s, startPrev, startCur));
   const last4P = sales.filter(s => inRange(s, start4P, today));
   const sum = a => a.reduce((s, b) => s + b.q, 0);
+  const sCurrent = sum(cur);
+  const sPrev = sum(prev);
+  const sAvg4 = last4P.length ? sum(last4P) / 4 : 0;
+  // RÉFÉRENCE de prévision : on n'utilise PAS la période courante (semaine en cours
+  // incomplète → ventes ~0). On prend la période précédente (-1). Si elle est vide,
+  // repli sur la moyenne des 4 dernières périodes.
+  let ref = sPrev;
+  let refSource = 'prev';
+  if (sPrev === 0 && sAvg4 > 0) { ref = sAvg4; refSource = 'avg4'; }
   return {
-    current: sum(cur),
-    prev: sum(prev),
-    avg4: last4P.length ? sum(last4P) / 4 : 0,
+    current: sCurrent,
+    prev: sPrev,
+    avg4: sAvg4,
+    ref: ref,
+    refSource: refSource,
     daysCur: cur.length,
     periodDays: N,
   };
@@ -159,8 +170,9 @@ const buildScenarios = (stats, stock, daysToCover, pcb, adjCoef) => {
   // stats.periodDays = durée de la période
   // daysToCover = combien de jours il faut couvrir (généralement = periodDays + délai jusqu'à prochaine livraison)
   const N = stats.periodDays || 7;
-  // Vitesse de vente par jour calendaire
-  const ratePerDay = N > 0 ? stats.current / N : 0;
+  // RÉFÉRENCE = période -1 (repli moy 4 périodes), PAS la période courante incomplète
+  const refVentes = (typeof stats.ref === 'number') ? stats.ref : (stats.prev || 0);
+  const ratePerDay = N > 0 ? refVentes / N : 0;
   const trend = stats.prev > 0 ? stats.current / stats.prev : 1;
   const vsAvg = stats.avg4 > 0 ? stats.current / stats.avg4 : 1;
   
@@ -293,7 +305,7 @@ function MarkAsPassedModal({ apiUrl, supplierEntry, data, onClose, onSaved }) {
       if (withDetail) {
         lines = products
           .map(p => ({
-            productId: p.id, produit: p.produit, stock: p.stockFin,
+            productId: p.id, produit: p.produit, stock: p.stockEff,
             ventes7j: 0, proposedMedian: 0,
             validated: parseFloat(quantities[p.id]) || 0,
           }))
@@ -373,7 +385,7 @@ function MarkAsPassedModal({ apiUrl, supplierEntry, data, onClose, onSaved }) {
               {products.map(p => (
                 <tr key={p.id}>
                   <td><strong>{p.produit}</strong><div className="small">{p.unite}</div></td>
-                  <td className="num">{p.stockFin}</td>
+                  <td className="num">{p.stockEff}</td>
                   <td className="small">{p.pcb || 1}</td>
                   <td>
                     <input type="number" className="qty-input" value={quantities[p.id] || ''} placeholder="0"
@@ -707,7 +719,7 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
     }
     // Sinon (mode init_light) : charger spécifiquement pour ce fournisseur
     setStatsLoading(true);
-    callApi(apiUrl, 'get_supplier_stats', { supplier: supplier.name })
+    callApi(apiUrl, 'get_supplier_stats', { supplier: supplier.name, stockFile: (data && data.stockFile) || { which:'last', col:'fin' } })
       .then(r => {
         setSupplierStats(r);
       })
@@ -745,6 +757,8 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
         const pcb = pcbFromBdc || pcbFromFiches || 1;
         return {
           ...stockItem,
+          // stock effectif : champ `stock` du backend (selon colonne choisie), repli stockFin
+          stockEff: (typeof stockItem.stock === 'number') ? stockItem.stock : (stockItem.stockFin || 0),
           paht: (bdcItem && bdcItem.paht) || info.paht || 0,
           pcb: pcb,
           pcbSource: pcbFromBdc ? 'bdc' : (pcbFromFiches ? 'fiches' : 'default'),
@@ -762,7 +776,7 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
       const stats = computeStats(sales, today, periodDays);
       const pcb = pcbOverrides[p.id] || p.pcb || 1;
       const adjCoef = computeAdjustment(p.id, learnings);
-      const r = buildScenarios(stats, p.stockFin, daysToCover, pcb, adjCoef);
+      const r = buildScenarios(stats, p.stockEff, daysToCover, pcb, adjCoef);
       return { product: p, stats, ...r, pcb, adjCoef };
     });
   }, [productsForSupplier, salesByProduct, today, daysToCover, pcbOverrides, learnings, periodDays]);
@@ -830,7 +844,7 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
             <th>Produit</th>
             <th className="num">Stock</th>
             <th className="num">Période ({periodDays}j)</th>
-            <th className="num">Période -1</th>
+            <th className="num" style={{color:'#2d6a2d'}}>Période -1 ★réf</th>
             <th className="num">Moy 4 périodes</th>
             <th>PCB</th>
             <th colSpan="3">Propositions (cliquer)</th>
@@ -864,9 +878,12 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
                   <strong>{pa.product.produit}</strong>
                   <div className="small">{pa.product.unite}</div>
                 </td>
-                <td className="num"><strong>{pa.product.stockFin}</strong></td>
+                <td className="num"><strong>{pa.product.stockEff}</strong></td>
                 <td className="num">{pa.stats.current}<div className="small">{pa.stats.daysCur}j {trendIcon}</div></td>
-                <td className="num small">{pa.stats.prev}</td>
+                <td className="num" style={{color:'#2d6a2d', fontWeight:700}}>
+                  {pa.stats.prev}
+                  {pa.stats.refSource === 'avg4' && <div className="small" style={{color:'#b7791f'}}>↳ moy4: {pa.stats.avg4.toFixed(1)}</div>}
+                </td>
                 <td className="num small">{pa.stats.avg4.toFixed(1)}</td>
                 <td>
                   <input type="number" className="qty-input" value={pcbOverrides[pa.product.id] || pa.product.pcb || 1}
@@ -932,9 +949,9 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
                       
                       <div className="expand-section">
                         <strong>💡 Propositions détaillées</strong>
-                        <div className="expand-row">Prudent : cible {pa.scenarios.prudent.target} → manque {Math.max(0, pa.scenarios.prudent.target - pa.product.stockFin)} → cmd <strong>{pa.scenarios.prudent.need}</strong> (arrondi PCB {pa.pcb})</div>
-                        <div className="expand-row">Médian : cible {pa.scenarios.median.target} → manque {Math.max(0, pa.scenarios.median.target - pa.product.stockFin)} → cmd <strong>{pa.scenarios.median.need}</strong> (arrondi PCB {pa.pcb})</div>
-                        <div className="expand-row">Large : cible {pa.scenarios.large.target} → manque {Math.max(0, pa.scenarios.large.target - pa.product.stockFin)} → cmd <strong>{pa.scenarios.large.need}</strong> (arrondi PCB {pa.pcb})</div>
+                        <div className="expand-row">Prudent : cible {pa.scenarios.prudent.target} → manque {Math.max(0, pa.scenarios.prudent.target - pa.product.stockEff)} → cmd <strong>{pa.scenarios.prudent.need}</strong> (arrondi PCB {pa.pcb})</div>
+                        <div className="expand-row">Médian : cible {pa.scenarios.median.target} → manque {Math.max(0, pa.scenarios.median.target - pa.product.stockEff)} → cmd <strong>{pa.scenarios.median.need}</strong> (arrondi PCB {pa.pcb})</div>
+                        <div className="expand-row">Large : cible {pa.scenarios.large.target} → manque {Math.max(0, pa.scenarios.large.target - pa.product.stockEff)} → cmd <strong>{pa.scenarios.large.need}</strong> (arrondi PCB {pa.pcb})</div>
                       </div>
                     </div>
                   </td>
@@ -979,7 +996,7 @@ function StepValidate({ supplier, productAnalyses, selectedScenario, overrides, 
       productId: pa.product.id,
       produit: pa.product.produit,
       qty: getQty(pa),
-      stock: pa.product.stockFin,
+      stock: pa.product.stockEff,
       ventes7j: pa.stats.current,
       proposedMedian: pa.scenarios.median.need,
       paht: pa.product.paht,
@@ -1313,6 +1330,49 @@ function BdcAlertBanner({ bdcCheck }) {
   );
 }
 
+function StockSourceSelector({ stockFile, setStockFile, stockData }) {
+  const which = stockFile.which || 'last';
+  const col = stockFile.col || 'fin';
+  const avail = (stockData && stockData.availableDates) || [];
+  const lastDate = avail[0];
+  const prevDate = avail[1];
+  const btn = (active) => ({
+    flex:1, padding:'7px 6px', fontSize:12, fontWeight:600, cursor:'pointer',
+    border:'1px solid ' + (active ? '#2d6a2d' : '#cbd5e0'),
+    background: active ? '#e8f5e8' : '#fff',
+    color: active ? '#2d6a2d' : '#4a5568', borderRadius:6,
+  });
+  return (
+    <div className="card" style={{padding:'10px 12px', marginBottom:8}}>
+      <div style={{fontSize:11, fontWeight:700, color:'#718096', marginBottom:6, textTransform:'uppercase'}}>
+        📦 Source du stock
+      </div>
+      <div style={{display:'flex', gap:6, marginBottom:6}}>
+        <button style={btn(which==='last')} onClick={() => setStockFile({ ...stockFile, which:'last' })}>
+          Dernier fichier{lastDate ? ' ('+lastDate+')' : ''}
+        </button>
+        <button style={btn(which==='prev')} onClick={() => setStockFile({ ...stockFile, which:'prev' })}>
+          Veille{prevDate ? ' ('+prevDate+')' : ''}
+        </button>
+      </div>
+      <div style={{display:'flex', gap:6}}>
+        <button style={btn(col==='fin')} onClick={() => setStockFile({ ...stockFile, col:'fin' })}>
+          Stock fin
+        </button>
+        <button style={btn(col==='debut')} onClick={() => setStockFile({ ...stockFile, col:'debut' })}>
+          Stock début
+        </button>
+      </div>
+      {stockData && stockData.filename && (
+        <div style={{fontSize:10, color:'#a0aec0', marginTop:6}}>
+          Lecture : {stockData.filename} · colonne « {col==='debut' ? 'Stock début' : 'Stock fin'} »
+          {col==='debut' && stockData.hasStockDebut === false && <span style={{color:'#9B2C2C'}}> — ⚠️ colonne absente</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const [apiUrl, setApiUrl] = useState(DEFAULT_APPS_SCRIPT_URL);
   const [configExpanded, setConfigExpanded] = useState(!DEFAULT_APPS_SCRIPT_URL); // ouvert si pas d'URL
@@ -1328,6 +1388,18 @@ function App() {
   const [overrides, setOverrides] = useState({});
   const [context, setContext] = useState('');
   const [finalLines, setFinalLines] = useState(null);
+
+  // Choix de la source stock : which = last|prev, col = fin|debut
+  const [stockFile, setStockFile] = useState(() => {
+    try {
+      const s = localStorage.getItem('kbg_stockfile_v1');
+      if (s) return JSON.parse(s);
+    } catch (_) {}
+    return { which: 'last', col: 'fin' };
+  });
+  useEffect(() => {
+    try { localStorage.setItem('kbg_stockfile_v1', JSON.stringify(stockFile)); } catch (_) {}
+  }, [stockFile]);
 
   const dataStatus = useMemo(() => {
     if (!data) return { Cadencier: 'load', Stats: 'load', Produits: 'load', Stock: 'load' };
@@ -1365,7 +1437,7 @@ function App() {
     const startTime = Date.now();
     try {
       const [init, learn] = await Promise.all([
-        callApi(apiUrl, 'init_light'),
+        callApi(apiUrl, 'init_light', { stockFile }),
         callApi(apiUrl, 'get_learnings').catch(() => ({ entries: [] })),
       ]);
       if (init.error) throw new Error(init.error);
@@ -1388,7 +1460,7 @@ function App() {
     }
     setLoading(false);
     setRefreshing(false);
-  }, [apiUrl]);
+  }, [apiUrl, stockFile]);
 
   // Au premier render : si on a du cache, ne pas mettre loading=true mais rafraîchir en background
   useEffect(() => { 
@@ -1401,6 +1473,14 @@ function App() {
     }
   }, [apiUrl]);
 
+  // Recharger quand la source stock change (sélecteur)
+  const firstStockRef = useRef(true);
+  useEffect(() => {
+    if (firstStockRef.current) { firstStockRef.current = false; return; }
+    if (!apiUrl) return;
+    loadAll(false);
+  }, [stockFile]);
+
   const reset = () => {
     setStep(0); setSupplier(null); setProductAnalyses(null);
     setSelectedScenario({}); setOverrides({}); setFinalLines(null); setContext('');
@@ -1412,6 +1492,7 @@ function App() {
       <ConfigPanel apiUrl={apiUrl} setApiUrl={setApiUrl} onReload={loadAll} 
         expanded={configExpanded} setExpanded={setConfigExpanded}/>
       <BdcAlertBanner bdcCheck={data?.bdcCheck}/>
+      <StockSourceSelector stockFile={stockFile} setStockFile={setStockFile} stockData={data?.stock}/>
       {refreshing && (
         <div style={{fontSize:11,color:'#718096',textAlign:'center',marginBottom:8}}>
           <span className="loader" style={{width:10,height:10}}/> Actualisation en arrière-plan...
@@ -1457,7 +1538,7 @@ function App() {
         </>
       )}
       <div style={{textAlign:'center',marginTop:20,color:'#a0aec0',fontSize:11}}>
-        Kelbongoo Commandes v4 · {data?.stock?.date && `Stock du ${data.stock.date}`} · 
+        Kelbongoo Commandes v6 · {data?.stock?.date && `Stock du ${data.stock.date}`} · 
         {learnings?.entries?.length || 0} validations en apprentissage
         {lastLoadMs !== null && (
           <span> · Dernier chargement : <strong>{(lastLoadMs / 1000).toFixed(1)}s</strong>
