@@ -752,16 +752,18 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
         const info = products.find(p => p.id === stockItem.id) || {};
         // PCB : priorité au BDC, fallback fiches-produits
         const bdcItem = bdcByNormName[normalizeName(stockItem.produit)];
+        // PCB : priorité au fichier stock (colonne CDT/PCB/Conditionnement), puis BDC, puis fiches
+        const pcbFromStock = (stockItem.pcbStock && !isNaN(stockItem.pcbStock)) ? stockItem.pcbStock : null;
         const pcbFromBdc = bdcItem && bdcItem.pcb && !isNaN(bdcItem.pcb) ? bdcItem.pcb : null;
         const pcbFromFiches = info.pcb || null;
-        const pcb = pcbFromBdc || pcbFromFiches || 1;
+        const pcb = pcbFromStock || pcbFromBdc || pcbFromFiches || 1;
         return {
           ...stockItem,
           // stock effectif : champ `stock` du backend (selon colonne choisie), repli stockFin
           stockEff: (typeof stockItem.stock === 'number') ? stockItem.stock : (stockItem.stockFin || 0),
           paht: (bdcItem && bdcItem.paht) || info.paht || 0,
           pcb: pcb,
-          pcbSource: pcbFromBdc ? 'bdc' : (pcbFromFiches ? 'fiches' : 'default'),
+          pcbSource: pcbFromStock ? 'stock' : (pcbFromBdc ? 'bdc' : (pcbFromFiches ? 'fiches' : 'default')),
           ean: (bdcItem && bdcItem.ean) || info.ean || '',
           tva: info.tva || 5.5,
           inBdc: !!bdcItem,
@@ -843,7 +845,6 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
           <tr>
             <th>Produit</th>
             <th className="num">Stock</th>
-            <th className="num">Période ({periodDays}j)</th>
             <th className="num" style={{color:'#2d6a2d'}}>Période -1 ★réf</th>
             <th className="num">Moy 4 périodes</th>
             <th>PCB</th>
@@ -879,7 +880,6 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
                   <div className="small">{pa.product.unite}</div>
                 </td>
                 <td className="num"><strong>{pa.product.stockEff}</strong></td>
-                <td className="num">{pa.stats.current}<div className="small">{pa.stats.daysCur}j {trendIcon}</div></td>
                 <td className="num" style={{color:'#2d6a2d', fontWeight:700}}>
                   {pa.stats.prev}
                   {pa.stats.refSource === 'avg4' && <div className="small" style={{color:'#b7791f'}}>↳ moy4: {pa.stats.avg4.toFixed(1)}</div>}
@@ -888,6 +888,11 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
                 <td>
                   <input type="number" className="qty-input" value={pcbOverrides[pa.product.id] || pa.product.pcb || 1}
                     onChange={e => setPcbOverrides({...pcbOverrides, [pa.product.id]: parseInt(e.target.value) || 1})}/>
+                  {!pcbOverrides[pa.product.id] && (
+                    <div className="small" style={{color: pa.product.pcbSource==='stock' ? '#2d6a2d' : (pa.product.pcbSource==='default' ? '#9B2C2C' : '#a0aec0')}}>
+                      {pa.product.pcbSource==='stock' ? 'CDT' : (pa.product.pcbSource==='bdc' ? 'BDC' : (pa.product.pcbSource==='fiches' ? 'fiche' : '⚠️ déf.'))}
+                    </div>
+                  )}
                 </td>
                 {['prudent', 'median', 'large'].map(scn => (
                   <td key={scn} className="qty-cell">
@@ -1367,6 +1372,10 @@ function StockSourceSelector({ stockFile, setStockFile, stockData }) {
         <div style={{fontSize:10, color:'#a0aec0', marginTop:6}}>
           Lecture : {stockData.filename} · colonne « {col==='debut' ? 'Stock début' : 'Stock fin'} »
           {col==='debut' && stockData.hasStockDebut === false && <span style={{color:'#9B2C2C'}}> — ⚠️ colonne absente</span>}
+          {' · PCB : '}
+          {stockData.pcbFound
+            ? <span style={{color:'#2d6a2d'}}>colonne « {stockData.pcbColumn} »</span>
+            : <span style={{color:'#9B2C2C'}}>⚠️ aucune colonne CDT/PCB/Conditionnement trouvée dans le stock</span>}
         </div>
       )}
     </div>
@@ -1538,7 +1547,7 @@ function App() {
         </>
       )}
       <div style={{textAlign:'center',marginTop:20,color:'#a0aec0',fontSize:11}}>
-        Kelbongoo Commandes v6 · {data?.stock?.date && `Stock du ${data.stock.date}`} · 
+        Kelbongoo Commandes v7 · {data?.stock?.date && `Stock du ${data.stock.date}`} · 
         {learnings?.entries?.length || 0} validations en apprentissage
         {lastLoadMs !== null && (
           <span> · Dernier chargement : <strong>{(lastLoadMs / 1000).toFixed(1)}s</strong>
