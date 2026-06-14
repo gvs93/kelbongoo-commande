@@ -683,6 +683,8 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
   const [overrides, setOverrides] = useState({});
   const [pcbOverrides, setPcbOverrides] = useState({});
   const [expandedRows, setExpandedRows] = useState({});
+  const [infoRows, setInfoRows] = useState({});
+  const [infoCover, setInfoCover] = useState(false);
   
   // Chargement BDC du fournisseur
   const [bdc, setBdc] = useState(null);
@@ -829,10 +831,34 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
         </div>
       )}
       <div className="row" style={{marginBottom:12}}>
-        <div className="col" style={{maxWidth:200}}>
-          <label>Jours à couvrir</label>
+        <div className="col" style={{maxWidth:240}}>
+          <label>
+            Jours à couvrir
+            <button title="Pourquoi ce nombre ?"
+              onClick={() => setInfoCover(!infoCover)}
+              style={{marginLeft:6, border:'1px solid #cbd5e0', background:'#fff', borderRadius:10,
+                width:18, height:18, lineHeight:'14px', fontSize:11, fontWeight:700,
+                color:'#3182ce', cursor:'pointer', padding:0}}>i</button>
+          </label>
           <input type="number" value={daysToCover} onChange={e => setDaysToCover(parseInt(e.target.value) || 7)} min="1" max="60"/>
           <div className="small">Défaut = {daysUntilDelivery}j (jusqu'à livraison) + {periodDays}j (période)</div>
+          {infoCover && (() => {
+            const ms = 86400000;
+            const nextDeliv = new Date(today.getTime() + daysUntilDelivery * ms);
+            const afterDeliv = new Date(nextDeliv.getTime() + periodDays * ms);
+            const fmt = d => d.toLocaleDateString('fr-FR', {weekday:'long', day:'numeric', month:'short'});
+            return (
+              <div style={{marginTop:6, padding:'8px 10px', background:'#ebf8ff', border:'1px solid #bee3f8',
+                borderRadius:6, fontSize:12, color:'#2c5282', lineHeight:1.5}}>
+                <strong>Période à couvrir, stock actuel compris.</strong><br/>
+                On commande aujourd'hui ({fmt(today)}). Prochaine livraison : <strong>{fmt(nextDeliv)}</strong> (dans {daysUntilDelivery}j).
+                La livraison d'après : <strong>{fmt(afterDeliv)}</strong>.<br/>
+                Le stock doit donc tenir de maintenant jusqu'à cette livraison suivante, soit <strong>{defaultDaysToCover} jours</strong>.
+                Le stock que tu as déjà est pris en compte (la commande = besoin total − stock actuel).
+                Ajuste ce nombre si tu prévois plus/moins de ventes.
+              </div>
+            );
+          })()}
         </div>
         <div className="col" style={{flex:3}}>
           <label>💡 Contexte (météo, vacances, fériés...)</label>
@@ -904,6 +930,13 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
                       <span className="badge">{pa.scenarios[scn].label}</span>
                       <div style={{fontSize:16,fontWeight:700,margin:'2px 0'}}>{pa.scenarios[scn].need}</div>
                       <div className="small">cible: {pa.scenarios[scn].target}</div>
+                      {scn === 'median' && (
+                        <button title="Comment ce chiffre est calculé"
+                          onClick={(e) => { e.stopPropagation(); setExpandedRows({...expandedRows, [pa.product.id]: !isExpanded}); }}
+                          style={{marginTop:3, border:'1px solid #cbd5e0', background:'#fff', borderRadius:10,
+                            width:18, height:18, lineHeight:'14px', fontSize:11, fontWeight:700,
+                            color:'#3182ce', cursor:'pointer', padding:0}}>i</button>
+                      )}
                     </div>
                   </td>
                 ))}
@@ -945,11 +978,21 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
                       </div>
                       
                       <div className="expand-section">
-                        <strong>🧮 Mon raisonnement</strong>
-                        <div className="expand-row">Vitesse vente : {pa.ratePerDay.toFixed(2)} /jour calendaire</div>
-                        <div className="expand-row">Jours à couvrir : {daysToCover}j</div>
-                        <div className="expand-row">Besoin de base : {pa.baseNeed.toFixed(1)}</div>
-                        <div className="expand-row">Coefficient appris : {pa.adjCoef.toFixed(2)} {pa.adjCoef === 1.0 ? '(pas d\'historique)' : ''}</div>
+                        <strong>🧮 Comment j'arrive à ces chiffres</strong>
+                        <div className="expand-row">
+                          1. Référence de vente : <span className="num">{pa.stats.refSource === 'avg4' ? pa.stats.avg4.toFixed(1) : pa.stats.prev}</span>
+                          {pa.stats.refSource === 'avg4'
+                            ? ' (moyenne des 4 dernières périodes — la période -1 était vide)'
+                            : ' (ventes de la période précédente, sur ' + periodDays + 'j)'}
+                        </div>
+                        <div className="expand-row">2. Vitesse : {pa.stats.refSource === 'avg4' ? pa.stats.avg4.toFixed(1) : pa.stats.prev} ÷ {periodDays}j = <span className="num">{pa.ratePerDay.toFixed(2)}</span> /jour</div>
+                        <div className="expand-row">3. Jours à couvrir : <span className="num">{daysToCover}j</span> (délai jusqu'à la prochaine livraison + 1 période)</div>
+                        <div className="expand-row">4. Besoin de base : {pa.ratePerDay.toFixed(2)} × {daysToCover} = <span className="num">{pa.baseNeed.toFixed(1)}</span></div>
+                        <div className="expand-row">5. Médian = besoin × 1,05 {pa.adjCoef !== 1 ? '× ' + pa.adjCoef.toFixed(2) + ' (coef appris)' : ''} = <span className="num">{(pa.baseNeed * 1.05 * pa.adjCoef).toFixed(1)}</span> → cible {pa.scenarios.median.target}</div>
+                        <div className="expand-row">6. À commander = cible − stock ({pa.product.stockEff}) = {Math.max(0, pa.scenarios.median.target - pa.product.stockEff)}, arrondi PCB {pa.pcb} → <strong>{pa.scenarios.median.need}</strong></div>
+                        <div className="expand-row" style={{marginTop:4, color:'#718096'}}>
+                          ℹ️ Le chiffre dépasse souvent les ventes d'une seule période car il couvre <strong>{daysToCover} jours</strong>, pas {periodDays}.
+                        </div>
                       </div>
                       
                       <div className="expand-section">
@@ -1547,7 +1590,7 @@ function App() {
         </>
       )}
       <div style={{textAlign:'center',marginTop:20,color:'#a0aec0',fontSize:11}}>
-        Kelbongoo Commandes v7 · {data?.stock?.date && `Stock du ${data.stock.date}`} · 
+        Kelbongoo Commandes v9 · {data?.stock?.date && `Stock du ${data.stock.date}`} · 
         {learnings?.entries?.length || 0} validations en apprentissage
         {lastLoadMs !== null && (
           <span> · Dernier chargement : <strong>{(lastLoadMs / 1000).toFixed(1)}s</strong>
