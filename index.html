@@ -462,7 +462,7 @@ function StepDashboard({ apiUrl, data, onSelectSupplier, onSkipToList, onRefresh
         franco: entry.franco,
         mail: entry.mail,
         periodDays: entry.periodDays || 7,
-        daysUntilNextDelivery: entry.daysUntilDeadline !== null ? (entry.daysUntilDeadline + 1) : null,
+        daysUntilNextDelivery: (typeof entry.daysUntilNextDelivery === 'number') ? entry.daysUntilNextDelivery : 0,
       },
     });
   };
@@ -767,6 +767,7 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
           pcb: pcb,
           pcbSource: pcbFromStock ? 'stock' : (pcbFromBdc ? 'bdc' : (pcbFromFiches ? 'fiches' : 'default')),
           ean: (bdcItem && bdcItem.ean) || info.ean || '',
+          code: (bdcItem && bdcItem.code) || info.ref1 || '',
           tva: info.tva || 5.5,
           inBdc: !!bdcItem,
         };
@@ -1049,6 +1050,7 @@ function StepValidate({ supplier, productAnalyses, selectedScenario, overrides, 
       proposedMedian: pa.scenarios.median.need,
       paht: pa.product.paht,
       ean: pa.product.ean,
+      code: pa.product.code,
       pcb: pa.pcb,
       unite: pa.product.unite,
     }))
@@ -1118,7 +1120,7 @@ function StepExport({ apiUrl, supplier, lines, context, onBack, onReset }) {
   const [bdcResult, setBdcResult] = useState(null);
   const [bdcWriting, setBdcWriting] = useState(false);
 
-  const txtContent = lines.map(l => `${l.ean || l.productId}\t${l.qty}`).join('\n');
+  const txtContent = lines.map(l => `${l.ean || l.code || l.productId}\t${l.qty}`).join('\n');
   const totalAmount = lines.reduce((s, l) => s + l.qty * (l.paht || 0), 0);
 
   useEffect(() => {
@@ -1164,7 +1166,7 @@ function StepExport({ apiUrl, supplier, lines, context, onBack, onReset }) {
     const data = [
       ['GENCODE', 'CODE', 'Produits', 'Unité', 'PCB', 'CDE en UVC', 'Unité fact', 'PA HT', 'Montant HT'],
       ...lines.map(l => [
-        l.ean || '', l.productId, l.produit, l.unite || '', l.pcb || 1,
+        l.ean || '', l.code || l.productId, l.produit, l.unite || '', l.pcb || 1,
         l.qty, 'pièce', l.paht ? l.paht.toFixed(2) : '',
         l.paht ? (l.paht * l.qty).toFixed(2) : ''
       ]),
@@ -1590,7 +1592,7 @@ function App() {
         </>
       )}
       <div style={{textAlign:'center',marginTop:20,color:'#a0aec0',fontSize:11}}>
-        Kelbongoo Commandes v9 · {data?.stock?.date && `Stock du ${data.stock.date}`} · 
+        Kelbongoo Commandes v11 · {data?.stock?.date && `Stock du ${data.stock.date}`} · 
         {learnings?.entries?.length || 0} validations en apprentissage
         {lastLoadMs !== null && (
           <span> · Dernier chargement : <strong>{(lastLoadMs / 1000).toFixed(1)}s</strong>
