@@ -173,36 +173,91 @@ const callApi = async (url, action, params = {}) => {
 // ============================================================
 //                    MOTEUR DE PRÉDICTION
 // ============================================================
-const computeStats = (sales, today, periodDays) => {
-  if (!sales || !sales.length) return { current: 0, prev: 0, avg4: 0, ref: 0, refSource: 'none', daysCur: 0, periodDays: periodDays };
-  const N = periodDays || 7;
-  const ms = 24 * 3600 * 1000;
-  const toDate = (s) => new Date(s + 'T00:00:00');
-  const startCur = new Date(today.getTime() - N * ms);
-  const startPrev = new Date(today.getTime() - 2 * N * ms);
-  const start4P = new Date(today.getTime() - 4 * N * ms);
-  const inRange = (s, from, to) => { const d = toDate(s.d); return d > from && d <= to; };
-  const cur = sales.filter(s => inRange(s, startCur, today));
-  const prev = sales.filter(s => inRange(s, startPrev, startCur));
-  const last4P = sales.filter(s => inRange(s, start4P, today));
-  const sum = a => a.reduce((s, b) => s + b.q, 0);
-  const sCurrent = sum(cur);
-  const sPrev = sum(prev);
-  const sAvg4 = last4P.length ? sum(last4P) / 4 : 0;
-  // RÉFÉRENCE de prévision : on n'utilise PAS la période courante (semaine en cours
-  // incomplète → ventes ~0). On prend la période précédente (-1). Si elle est vide,
-  // repli sur la moyenne des 4 dernières périodes.
-  let ref = sPrev;
-  let refSource = 'prev';
-  if (sPrev === 0 && sAvg4 > 0) { ref = sAvg4; refSource = 'avg4'; }
+// ============================================================
+//  MODÈLE DE PÉRIODE  (aligné par JOUR DE SEMAINE + décalage prépa→vente)
+// ============================================================
+// Dans l'onglet "STATS VENTES Player One", une colonne datée = la PRÉPA de
+// ce jour, dont la valeur = les VENTES DU LENDEMAIN (ventes fermées la veille
+// à 10h). Donc : prépa mardi → ventes mercredi, prépa mercredi → ventes jeudi,
+// prépa jeudi → ventes vendredi, prépa vendredi → ventes samedi.
+// Pas de prépa samedi/dimanche/lundi → pas de colonne ces jours-là.
+//
+// Conséquence : pour couvrir la VENTE d'un jour J, on lit la colonne PRÉPA
+// datée J-1. Et une "période" se compare toujours sur LES MÊMES JOURS DE
+// SEMAINE d'une semaine à l'autre (jamais une fenêtre calendaire glissante).
+const WD_SHORT = ['dim', 'lun', 'mar', 'mer', 'jeu', 'ven', 'sam'];
+const WD_LONG  = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
+
+// Date du jour de semaine `weekday` dans la semaine de `ref`, reculée de `weeksBack` semaines.
+const dateForWeekday = (ref, weekday, weeksBack) => {
+  const d = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate());
+  d.setDate(d.getDate() + (weekday - d.getDay()) - 7 * (weeksBack || 0));
+  return d;
+};
+
+// Transforme la liste de ventes [{d,q}] en map {dateStr: q}
+const salesToMap = (sales) => {
+  const m = {};
+  (sales || []).forEach(s => { m[s.d] = (m[s.d] || 0) + (Number(s.q) || 0); });
+  return m;
+};
+
+// Somme des ventes pour un ensemble de JOURS DE VENTE (saleWeekdays = [3,4,5]
+// pour mer/jeu/ven), sur la semaine reculée de `weeksBack`.
+// On lit la colonne PRÉPA = jour de vente - 1.
+const periodSumForWeek = (salesMap, saleWeekdays, today, weeksBack) => {
+  let total = 0, found = 0;
+  const detail = [];
+  saleWeekdays.forEach(sw => {
+    const prepWd = (sw + 6) % 7;                       // sw - 1 (modulo 7)
+    const prepDate = dateForWeekday(today, prepWd, weeksBack);
+    const key = fmtDate(prepDate);
+    const has = Object.prototype.hasOwnProperty.call(salesMap, key);
+    const q = has ? salesMap[key] : 0;
+    if (has) found++;
+    total += q;
+    const saleDate = new Date(prepDate.getTime() + 86400000); // vente = lendemain de la prépa
+    detail.push({ saleWd: sw, saleDate: fmtDate(saleDate), prepDate: key, q: q, has: has });
+  });
+  return { total: total, found: found, detail: detail, days: saleWeekdays.length, weeksBack: weeksBack };
+};
+
+// Analyse complète d'un produit sur des jours de vente donnés :
+//   - P-1 (semaine précédente, mêmes jours)
+//   - moyenne des 4 dernières périodes (mêmes jours)
+//   - mise à l'échelle si une semaine de réf a moins de jours présents que la couverture
+const analyzeProductDays = (sales, today, saleWeekdays) => {
+  const salesMap = salesToMap(sales);
+  const coverDays = saleWeekdays.length || 1;
+  const periods = [];
+  for (let k = 1; k <= 4; k++) periods.push(periodSumForWeek(salesMap, saleWeekdays, today, k));
+  const current = periodSumForWeek(salesMap, saleWeekdays, today, 0); // semaine en cours (incomplète)
+
+  // "Mise à l'échelle" = ramener au nombre de jours à couvrir.
+  // Ex : 20 ventes sur 2 jours présents → 10/j → pour 3 jours couverts = 30.
+  // Quand tous les jours sont présents (cas normal), c'est du 1:1.
+  const scale = (p) => (p.found > 0 ? (p.total / p.found) * coverDays : 0);
+
+  const p1 = periods[0];
+  const p1Scaled = scale(p1);
+  const withData = periods.filter(p => p.found > 0);
+  const avg4Scaled = withData.length ? withData.reduce((a, p) => a + scale(p), 0) / withData.length : 0;
+
+  let ref = p1Scaled, refSource = 'p1';
+  if (p1.found === 0 && avg4Scaled > 0) { ref = avg4Scaled; refSource = 'avg4'; }
+
+  const prevTotal = periods[1] ? periods[1].total : 0;
+  const trend = (prevTotal > 0) ? p1.total / prevTotal : 1;
+
   return {
-    current: sCurrent,
-    prev: sPrev,
-    avg4: sAvg4,
-    ref: ref,
-    refSource: refSource,
-    daysCur: cur.length,
-    periodDays: N,
+    coverDays: coverDays,
+    periods: periods,          // [P-1, P-2, P-3, P-4] (chacun {total, found, detail, days})
+    current: current,          // semaine en cours (info/tendance)
+    p1: p1.total, p1Found: p1.found, p1Scaled: p1Scaled,
+    avg4: avg4Scaled, avg4Count: withData.length,
+    ref: ref, refSource: refSource,
+    trend: trend,
+    saleWeekdays: saleWeekdays,
   };
 };
 
@@ -219,29 +274,20 @@ const computeAdjustment = (productId, learnings) => {
   return ratios.reduce((a, b) => a + b, 0) / ratios.length;
 };
 
-const buildScenarios = (stats, stock, daysToCover, pcb, adjCoef) => {
-  // stats.current = ventes sur la période courante (N jours)
-  // stats.periodDays = durée de la période
-  // daysToCover = combien de jours il faut couvrir (généralement = periodDays + délai jusqu'à prochaine livraison)
-  const N = stats.periodDays || 7;
-  // RÉFÉRENCE = période -1 (repli moy 4 périodes), PAS la période courante incomplète
-  const refVentes = (typeof stats.ref === 'number') ? stats.ref : (stats.prev || 0);
-  const ratePerDay = N > 0 ? refVentes / N : 0;
-  const trend = stats.prev > 0 ? stats.current / stats.prev : 1;
-  const vsAvg = stats.avg4 > 0 ? stats.current / stats.avg4 : 1;
-  
-  // Besoin de base = vitesse × jours à couvrir
-  const baseNeed = ratePerDay * daysToCover;
-  
+const buildScenarios = (baseNeed, stock, pcb, adjCoef) => {
+  // baseNeed = ventes attendues sur les jours à couvrir (réf P-1 ou moy-4,
+  // déjà ramenée au nombre de jours couverts). Pas de multiplication par une
+  // durée : on compare directement à la même tranche de jours des semaines passées.
+  baseNeed = baseNeed || 0;
   const prudent = baseNeed * 0.9;
   const median  = baseNeed * 1.05 * adjCoef;
   const large   = baseNeed * 1.25 * adjCoef;
-  
+
   const need = q => Math.max(0, q - stock);
   const roundPcb = q => pcb > 0 ? Math.ceil(q / pcb) * pcb : Math.ceil(q);
-  
+
   return {
-    ratePerDay, trend, vsAvg, baseNeed,
+    baseNeed: baseNeed,
     scenarios: {
       prudent: { target: Math.ceil(prudent), need: roundPcb(need(prudent)), label: 'Prudent' },
       median:  { target: Math.ceil(median),  need: roundPcb(need(median)),  label: 'Médian' },
@@ -728,10 +774,44 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
   // Période = nb jours entre 2 livraisons consécutives (depuis cadencier)
   const periodDays = supplier.cad?.periodDays || 7;
   const daysUntilDelivery = supplier.cad?.daysUntilNextDelivery || 0;
-  // daysToCover par défaut = délai jusqu'à prochaine livraison + 1 période entière
-  const defaultDaysToCover = daysUntilDelivery + periodDays;
-  
-  const [daysToCover, setDaysToCover] = useState(defaultDaysToCover);
+
+  // ── Auto-déduction des JOURS DE VENTE à couvrir ──────────────────────────
+  // De maintenant jusqu'à la livraison D'APRÈS la prochaine : tous les jours de
+  // vente (mer→sam, càd weekday 3..6) tombant dans cette fenêtre. L'utilisateur
+  // peut décocher (semaine spéciale, férié, commande sautée).
+  const autoCover = useMemo(() => {
+    const ms = 86400000;
+    const start = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const dUntil = Number.isFinite(daysUntilDelivery) ? Math.max(0, daysUntilDelivery) : 0;
+    const nextDeliv = new Date(start.getTime() + dUntil * ms);
+    const afterDeliv = new Date(nextDeliv.getTime() + (periodDays || 7) * ms);
+    const dates = [];
+    // jours de vente = du lendemain d'aujourd'hui jusqu'à la veille de la livraison d'après
+    for (let d = new Date(start.getTime() + ms); d < afterDeliv; d = new Date(d.getTime() + ms)) {
+      const wd = d.getDay();
+      if (wd >= 3 && wd <= 6) dates.push(fmtDate(d)); // mer, jeu, ven, sam = jours de vente possibles
+    }
+    return { nextDeliv: nextDeliv, afterDeliv: afterDeliv, dates: dates };
+  }, [today, daysUntilDelivery, periodDays]);
+
+  const [coverSaleDates, setCoverSaleDates] = useState(autoCover.dates);
+  const autoKey = autoCover.dates.join(',');
+  useEffect(() => { setCoverSaleDates(autoCover.dates); }, [autoKey]);
+
+  const toggleCoverDate = (ds) => {
+    setCoverSaleDates(prev => prev.indexOf(ds) >= 0 ? prev.filter(x => x !== ds) : [...prev, ds].sort());
+  };
+
+  // Jours de semaine de vente à couvrir (uniques, triés) → base des lectures P-1 / moy-4
+  const saleWeekdays = useMemo(() => {
+    const s = [];
+    coverSaleDates.forEach(ds => {
+      const wd = new Date(ds + 'T00:00:00').getDay();
+      if (s.indexOf(wd) < 0) s.push(wd);
+    });
+    return s.sort((a, b) => a - b);
+  }, [coverSaleDates]);
+
   const [context, setContext] = useState('');
   const [selectedScenario, setSelectedScenario] = useState({});
   const [overrides, setOverrides] = useState({});
@@ -859,13 +939,14 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
   const productAnalyses = useMemo(() => {
     return productsForSupplier.map(p => {
       const sales = salesByProduct[p.id] || [];
-      const stats = computeStats(sales, today, periodDays);
+      const stats = analyzeProductDays(sales, today, saleWeekdays);
       const pcb = pcbOverrides[p.id] || p.pcb || 1;
       const adjCoef = computeAdjustment(p.id, learnings);
-      const r = buildScenarios(stats, p.stockEff, daysToCover, pcb, adjCoef);
-      return { product: p, stats, ...r, pcb, adjCoef };
+      const baseNeed = stats.ref; // ventes attendues sur les jours couverts (P-1, repli moy-4)
+      const r = buildScenarios(baseNeed, p.stockEff, pcb, adjCoef);
+      return { product: p, stats, ...r, pcb, adjCoef, baseNeed };
     });
-  }, [productsForSupplier, salesByProduct, today, daysToCover, pcbOverrides, learnings, periodDays]);
+  }, [productsForSupplier, salesByProduct, today, saleWeekdays, pcbOverrides, learnings]);
 
   useEffect(() => {
     const def = {};
@@ -912,39 +993,67 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
           {!bdc.isGoogleSheet && <span style={{marginLeft:8}} className="pill pill-orange">⚠️ XLSX = écriture impossible</span>}
         </div>
       )}
-      <div className="row" style={{marginBottom:12}}>
-        <div className="col" style={{maxWidth:240}}>
-          <label>
-            Jours à couvrir
-            <button title="Pourquoi ce nombre ?"
-              onClick={() => setInfoCover(!infoCover)}
-              style={{marginLeft:6, border:'1px solid #cbd5e0', background:'#fff', borderRadius:10,
-                width:18, height:18, lineHeight:'14px', fontSize:11, fontWeight:700,
-                color:'#3182ce', cursor:'pointer', padding:0}}>i</button>
-          </label>
-          <input type="number" value={daysToCover} onChange={e => setDaysToCover(parseInt(e.target.value) || 7)} min="1" max="60"/>
-          <div className="small">Défaut = {daysUntilDelivery}j (jusqu'à livraison) + {periodDays}j (période)</div>
-          {infoCover && (() => {
-            const ms = 86400000;
-            const nextDeliv = new Date(today.getTime() + daysUntilDelivery * ms);
-            const afterDeliv = new Date(nextDeliv.getTime() + periodDays * ms);
-            const fmt = d => d.toLocaleDateString('fr-FR', {weekday:'long', day:'numeric', month:'short'});
+      <div style={{marginBottom:12}}>
+        <label>
+          Période à couvrir — jours de vente jusqu'à la prochaine livraison
+          <button title="Pourquoi ces jours ?"
+            onClick={() => setInfoCover(!infoCover)}
+            style={{marginLeft:6, border:'1px solid #cbd5e0', background:'#fff', borderRadius:10,
+              width:18, height:18, lineHeight:'14px', fontSize:11, fontWeight:700,
+              color:'#3182ce', cursor:'pointer', padding:0}}>i</button>
+        </label>
+        <div style={{display:'flex', gap:8, flexWrap:'wrap', alignItems:'center', marginTop:4}}>
+          {autoCover.dates.length === 0 && (
+            <span className="small" style={{color:'#9B2C2C'}}>
+              ⚠️ Impossible de déduire les jours (rythme de livraison manquant). Vérifie le cadencier.
+            </span>
+          )}
+          {autoCover.dates.map(ds => {
+            const dd = new Date(ds + 'T00:00:00');
+            const on = coverSaleDates.indexOf(ds) >= 0;
+            const prep = new Date(dd.getTime() - 86400000);
             return (
-              <div style={{marginTop:6, padding:'8px 10px', background:'#ebf8ff', border:'1px solid #bee3f8',
-                borderRadius:6, fontSize:12, color:'#2c5282', lineHeight:1.5}}>
-                <strong>Période à couvrir, stock actuel compris.</strong><br/>
-                On commande aujourd'hui ({fmt(today)}). Prochaine livraison : <strong>{fmt(nextDeliv)}</strong> (dans {daysUntilDelivery}j).
-                La livraison d'après : <strong>{fmt(afterDeliv)}</strong>.<br/>
-                Le stock doit donc tenir de maintenant jusqu'à cette livraison suivante, soit <strong>{defaultDaysToCover} jours</strong>.
-                Le stock que tu as déjà est pris en compte (la commande = besoin total − stock actuel).
-                Ajuste ce nombre si tu prévois plus/moins de ventes.
-              </div>
+              <button key={ds} onClick={() => toggleCoverDate(ds)}
+                title={'Vente ' + WD_LONG[dd.getDay()] + ' ' + dd.getDate() + ' — lue dans la colonne prépa ' + WD_SHORT[prep.getDay()] + ' ' + prep.getDate()}
+                style={{
+                  border: on ? '2px solid #3182ce' : '1px solid #cbd5e0',
+                  background: on ? '#ebf8ff' : '#fff',
+                  color: on ? '#2c5282' : '#a0aec0',
+                  borderRadius:8, padding:'6px 10px', cursor:'pointer', fontSize:12,
+                  fontWeight:600, textAlign:'center', lineHeight:1.3,
+                }}>
+                {on ? '☑' : '☐'} {WD_SHORT[dd.getDay()]} {dd.getDate()}/{dd.getMonth()+1}
+                <div style={{fontSize:10, fontWeight:400, color: on ? '#3182ce' : '#cbd5e0'}}>
+                  col. {WD_SHORT[prep.getDay()]} {prep.getDate()}
+                </div>
+              </button>
             );
-          })()}
+          })}
+          <span className="small" style={{marginLeft:4}}>
+            {saleWeekdays.length} jour{saleWeekdays.length > 1 ? 's' : ''} de vente à couvrir
+          </span>
         </div>
-        <div className="col" style={{flex:3}}>
-          <label>💡 Contexte (météo, vacances, fériés...)</label>
-          <input value={context} onChange={e => setContext(e.target.value)} placeholder="ex: canicule prévue, lundi férié..."/>
+        {infoCover && (() => {
+          const fmt = d => d.toLocaleDateString('fr-FR', {weekday:'long', day:'numeric', month:'short'});
+          return (
+            <div style={{marginTop:8, padding:'10px 12px', background:'#ebf8ff', border:'1px solid #bee3f8',
+              borderRadius:6, fontSize:12, color:'#2c5282', lineHeight:1.55}}>
+              <strong>Comment ces jours sont déterminés.</strong><br/>
+              L'entrepôt prépare la veille pour le lendemain : prépa mardi → ventes mercredi, mercredi → jeudi,
+              jeudi → vendredi, vendredi → samedi. Pas de prépa samedi/dimanche/lundi.<br/>
+              Prochaine livraison : <strong>{fmt(autoCover.nextDeliv)}</strong> · livraison d'après : <strong>{fmt(autoCover.afterDeliv)}</strong>.
+              Ton stock actuel + la prochaine livraison doivent tenir sur les jours de vente d'ici là — ce sont les jours cochés ci-dessus.<br/>
+              Pour chaque jour de vente coché, les ventes sont lues dans la <strong>colonne prépa de la veille</strong>
+              (indiquée sous chaque case), et comparées aux <strong>mêmes jours</strong> des semaines précédentes (P-1 et moyenne 4 périodes).<br/>
+              Le stock que tu as déjà est déduit (commande = besoin estimé − stock actuel). Décoche un jour pour une semaine spéciale (férié, commande sautée).
+            </div>
+          );
+        })()}
+        <div className="row" style={{marginTop:10}}>
+          <div className="col" style={{flex:3}}>
+            <label>💡 Contexte (météo, vacances, fériés...)</label>
+            <input value={context} onChange={e => setContext(e.target.value)} placeholder="ex: canicule prévue, lundi férié..."/>
+          </div>
         </div>
       </div>
       <div style={{overflowX:'auto'}}>
@@ -953,7 +1062,7 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
           <tr>
             <th>Produit</th>
             <th className="num">Stock</th>
-            <th className="num" style={{color:'#2d6a2d'}}>Période -1 ★réf</th>
+            <th className="num" style={{color:'#2d6a2d'}}>P-1 (mêmes jours) ★réf</th>
             <th className="num">Moy 4 périodes</th>
             <th>PCB</th>
             <th colSpan="3">Propositions (cliquer)</th>
@@ -967,16 +1076,6 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
             const finalQty = getQty(pa);
             const trendIcon = pa.trend > 1.15 ? '📈' : pa.trend < 0.85 ? '📉' : '→';
             const isExpanded = expandedRows[pa.product.id];
-            const productSales = (data.statsVentes?.salesByProduct?.[pa.product.id]) || [];
-            // Détail des derniers jours (période courante)
-            const ms = 24 * 3600 * 1000;
-            const startCur = new Date(today.getTime() - periodDays * ms);
-            const recentSales = productSales
-              .filter(s => {
-                const d = new Date(s.d + 'T00:00:00');
-                return d > startCur && d <= today;
-              })
-              .sort((a, b) => b.d.localeCompare(a.d));
             return [
               <tr key={pa.product.id}>
                 <td>
@@ -989,8 +1088,10 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
                 </td>
                 <td className="num"><strong>{pa.product.stockEff}</strong></td>
                 <td className="num" style={{color:'#2d6a2d', fontWeight:700}}>
-                  {pa.stats.prev}
-                  {pa.stats.refSource === 'avg4' && <div className="small" style={{color:'#b7791f'}}>↳ moy4: {pa.stats.avg4.toFixed(1)}</div>}
+                  {pa.stats.p1Scaled.toFixed(1)}
+                  {pa.stats.refSource === 'avg4' && <div className="small" style={{color:'#b7791f'}}>↳ P-1 vide, moy4: {pa.stats.avg4.toFixed(1)}</div>}
+                  {pa.stats.p1Found > 0 && pa.stats.p1Found < pa.stats.coverDays &&
+                    <div className="small" style={{color:'#b7791f'}}>{pa.stats.p1Found}/{pa.stats.coverDays} j → mis à l'échelle</div>}
                 </td>
                 <td className="num small">{pa.stats.avg4.toFixed(1)}</td>
                 <td>
@@ -1033,50 +1134,63 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
                   <td colSpan="12" style={{padding:0,background:'#f7fafc'}}>
                     <div className="expand-box">
                       <div className="expand-section">
-                        <strong>📊 Ventes des 7 derniers jours (jours de distribution)</strong>
-                        {recentSales.length === 0 ? (
-                          <div className="expand-row small">Aucune vente enregistrée sur cette période</div>
-                        ) : (
-                          recentSales.map(s => {
-                            const d = new Date(s.d + 'T00:00:00');
-                            return (
-                              <div key={s.d} className="expand-row">
-                                • {d.toLocaleDateString('fr-FR', {weekday:'short', day:'numeric', month:'short'})} : <span className="num">{s.q}</span>
-                              </div>
-                            );
-                          })
-                        )}
-                        <div className="expand-row" style={{marginTop:4,fontWeight:600}}>
-                          Total : <span className="num">{pa.stats.current}</span> sur {pa.stats.daysCur} jour{pa.stats.daysCur > 1 ? 's' : ''} de distrib
+                        <strong>📦 Jours de vente à couvrir (lus via la colonne prépa de la veille)</strong>
+                        {pa.stats.current.detail.length === 0 ? (
+                          <div className="expand-row small">Aucun jour sélectionné</div>
+                        ) : pa.stats.current.detail.map(d => {
+                          const sd = new Date(d.saleDate + 'T00:00:00');
+                          const pd = new Date(d.prepDate + 'T00:00:00');
+                          return (
+                            <div key={d.saleDate} className="expand-row">
+                              • Vente <strong>{WD_LONG[sd.getDay()]} {sd.getDate()}/{sd.getMonth()+1}</strong>
+                              {' '}← colonne prépa {WD_SHORT[pd.getDay()]} {pd.getDate()}/{pd.getMonth()+1}
+                              {' '}: <span className="num">{d.has ? d.q : '—'}</span>
+                              {!d.has && <span className="small" style={{color:'#b7791f'}}> (pas encore connu / pas de colonne)</span>}
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      <div className="expand-section">
+                        <strong>📈 Mêmes jours, semaines précédentes</strong>
+                        {pa.stats.periods.map((p, i) => (
+                          <div key={i} className="expand-row">
+                            P-{i+1} : <span className="num">{p.total}</span>
+                            {' '}<span className="small">({p.found}/{pa.stats.coverDays} jours présents — {p.detail.filter(x=>x.has).map(x => {
+                              const pd = new Date(x.prepDate + 'T00:00:00');
+                              return WD_SHORT[pd.getDay()]+' '+pd.getDate();
+                            }).join(', ') || 'aucune donnée'})</span>
+                          </div>
+                        ))}
+                        <div className="expand-row" style={{marginTop:4}}>
+                          Tendance P-1 vs P-2 : <span className="num">{((pa.trend - 1) * 100).toFixed(0)}%</span> {trendIcon}
                         </div>
-                      </div>
-                      
-                      <div className="expand-section">
-                        <strong>📈 Comparaisons</strong>
-                        <div className="expand-row">Période précédente ({periodDays}j) : <span className="num">{pa.stats.prev}</span></div>
-                        <div className="expand-row">Tendance vs période -1 : <span className="num">{((pa.trend - 1) * 100).toFixed(0)}%</span> {trendIcon}</div>
-                        <div className="expand-row">Moyenne 4 dernières périodes : <span className="num">{pa.stats.avg4.toFixed(1)}</span> /période</div>
-                        <div className="expand-row">Cette période vs moy 4 : <span className="num">{pa.stats.avg4 > 0 ? ((pa.stats.current/pa.stats.avg4 - 1) * 100).toFixed(0) : 0}%</span></div>
-                      </div>
-                      
-                      <div className="expand-section">
-                        <strong>🧮 Comment j'arrive à ces chiffres</strong>
                         <div className="expand-row">
-                          1. Référence de vente : <span className="num">{pa.stats.refSource === 'avg4' ? pa.stats.avg4.toFixed(1) : pa.stats.prev}</span>
-                          {pa.stats.refSource === 'avg4'
-                            ? ' (moyenne des 4 dernières périodes — la période -1 était vide)'
-                            : ' (ventes de la période précédente, sur ' + periodDays + 'j)'}
-                        </div>
-                        <div className="expand-row">2. Vitesse : {pa.stats.refSource === 'avg4' ? pa.stats.avg4.toFixed(1) : pa.stats.prev} ÷ {periodDays}j = <span className="num">{pa.ratePerDay.toFixed(2)}</span> /jour</div>
-                        <div className="expand-row">3. Jours à couvrir : <span className="num">{daysToCover}j</span> (délai jusqu'à la prochaine livraison + 1 période)</div>
-                        <div className="expand-row">4. Besoin de base : {pa.ratePerDay.toFixed(2)} × {daysToCover} = <span className="num">{pa.baseNeed.toFixed(1)}</span></div>
-                        <div className="expand-row">5. Médian = besoin × 1,05 {pa.adjCoef !== 1 ? '× ' + pa.adjCoef.toFixed(2) + ' (coef appris)' : ''} = <span className="num">{(pa.baseNeed * 1.05 * pa.adjCoef).toFixed(1)}</span> → cible {pa.scenarios.median.target}</div>
-                        <div className="expand-row">6. À commander = cible − stock ({pa.product.stockEff}) = {Math.max(0, pa.scenarios.median.target - pa.product.stockEff)}, arrondi PCB {pa.pcb} → <strong>{pa.scenarios.median.need}</strong></div>
-                        <div className="expand-row" style={{marginTop:4, color:'#718096'}}>
-                          ℹ️ Le chiffre dépasse souvent les ventes d'une seule période car il couvre <strong>{daysToCover} jours</strong>, pas {periodDays}.
+                          Moyenne 4 périodes (mêmes jours, à l'échelle) : <span className="num">{pa.stats.avg4.toFixed(1)}</span>
+                          {' '}<span className="small">(sur {pa.stats.avg4Count} période{pa.stats.avg4Count>1?'s':''} avec données)</span>
                         </div>
                       </div>
-                      
+
+                      <div className="expand-section">
+                        <strong>🧮 Comment j'arrive à la commande</strong>
+                        <div className="expand-row">
+                          1. Référence = {pa.stats.refSource === 'avg4'
+                            ? <>moyenne 4 périodes <span className="num">{pa.stats.avg4.toFixed(1)}</span> (P-1 vide)</>
+                            : <>ventes P-1 sur les {pa.stats.coverDays} jours couverts = <span className="num">{pa.stats.p1Scaled.toFixed(1)}</span></>}
+                        </div>
+                        {pa.stats.refSource !== 'avg4' && pa.stats.p1Found > 0 && pa.stats.p1Found < pa.stats.coverDays && (
+                          <div className="expand-row" style={{color:'#b7791f'}}>
+                            ↳ mise à l'échelle : {pa.stats.p1} vendu sur {pa.stats.p1Found} jour(s) présent(s) → ramené à {pa.stats.coverDays} jours = {pa.stats.p1Scaled.toFixed(1)}
+                          </div>
+                        )}
+                        <div className="expand-row">2. Besoin de base (ventes attendues) : <span className="num">{pa.baseNeed.toFixed(1)}</span></div>
+                        <div className="expand-row">3. Médian = besoin × 1,05 {pa.adjCoef !== 1 ? '× ' + pa.adjCoef.toFixed(2) + ' (coef appris)' : ''} = <span className="num">{(pa.baseNeed * 1.05 * pa.adjCoef).toFixed(1)}</span> → cible {pa.scenarios.median.target}</div>
+                        <div className="expand-row">4. À commander = cible − stock actuel ({pa.product.stockEff}) = {Math.max(0, pa.scenarios.median.target - pa.product.stockEff)}, arrondi PCB {pa.pcb} → <strong>{pa.scenarios.median.need}</strong></div>
+                        <div className="expand-row" style={{marginTop:4, color:'#718096'}}>
+                          ℹ️ On compare directement les mêmes jours de semaine d'une période à l'autre (avec le décalage prépa→vente), pas une moyenne sur des jours calendaires.
+                        </div>
+                      </div>
+
                       <div className="expand-section">
                         <strong>💡 Propositions détaillées</strong>
                         <div className="expand-row">Prudent : cible {pa.scenarios.prudent.target} → manque {Math.max(0, pa.scenarios.prudent.target - pa.product.stockEff)} → cmd <strong>{pa.scenarios.prudent.need}</strong> (arrondi PCB {pa.pcb})</div>
@@ -1106,7 +1220,7 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
         <div>
           <button className="btn btn-secondary" onClick={onBack}>← Retour</button>
           <button className="btn btn-success" style={{marginLeft:8}}
-            onClick={() => onValidate(productAnalyses, selectedScenario, overrides, context, daysToCover)}>
+            onClick={() => onValidate(productAnalyses, selectedScenario, overrides, context)}>
             Valider →
           </button>
         </div>
@@ -1127,7 +1241,7 @@ function StepValidate({ supplier, productAnalyses, selectedScenario, overrides, 
       produit: pa.product.produit,
       qty: getQty(pa),
       stock: pa.product.stockEff,
-      ventes7j: pa.stats.current,
+      ventes7j: pa.stats.p1,
       proposedMedian: pa.scenarios.median.need,
       paht: pa.product.paht,
       ean: pa.product.ean,
