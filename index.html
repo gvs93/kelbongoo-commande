@@ -789,17 +789,44 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
   const products = (data.products && data.products.products) || [];
   const salesByProduct = (supplierStats && supplierStats.salesByProduct) || {};
 
-  // Construire un map normalisé pour matching produit ↔ BDC
-  const bdcByNormName = useMemo(() => {
-    const m = {};
+  // Construire des index normalisés pour matching produit ↔ BDC.
+  // On indexe par nom normalisé ET par EAN, pour aligner la LECTURE du PCB
+  // sur l'ÉCRITURE serveur (actionWriteBdc) : EAN → nom exact → recouvrement de mots.
+  const bdcIndex = useMemo(() => {
+    const byName = {}, byEan = {};
     if (bdc && bdc.items) {
       bdc.items.forEach(it => {
         const key = normalizeName(it.produit);
-        if (key) m[key] = it;
+        if (key) byName[key] = it;
+        const ean = String(it.ean || '').trim();
+        if (ean) byEan[ean] = it;
       });
     }
-    return m;
+    return { byName: byName, byEan: byEan };
   }, [bdc]);
+
+  // Rapprochement robuste d'un produit (stock + fiche) vers une ligne du BDC :
+  //   1) EAN (depuis la fiche-produit)
+  //   2) nom normalisé exact
+  //   3) recouvrement de mots significatifs (>= 2 mots communs, le meilleur score)
+  const matchBdcItem = useCallback((stockItem, info) => {
+    const byName = bdcIndex.byName, byEan = bdcIndex.byEan;
+    const ean = String((info && info.ean) || '').trim();
+    if (ean && byEan[ean]) return byEan[ean];
+    const norm = normalizeName(stockItem.produit);
+    if (norm && byName[norm]) return byName[norm];
+    const words = String(stockItem.produit || '').toLowerCase().normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '').split(/[^a-z0-9]+/)
+      .filter(w => w.length >= 3);
+    if (!words.length) return null;
+    let best = null, bestScore = 0;
+    Object.keys(byName).forEach(key => {
+      let score = 0;
+      words.forEach(w => { if (key.indexOf(w) >= 0) score++; });
+      if (score >= 2 && score > bestScore) { bestScore = score; best = byName[key]; }
+    });
+    return best;
+  }, [bdcIndex]);
 
   const productsForSupplier = useMemo(() => {
     return stockRows
@@ -807,7 +834,7 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
       .map(stockItem => {
         const info = products.find(p => p.id === stockItem.id) || {};
         // PCB : priorité au BDC, fallback fiches-produits
-        const bdcItem = bdcByNormName[normalizeName(stockItem.produit)];
+        const bdcItem = matchBdcItem(stockItem, info);
         // PCB : priorité au fichier stock (colonne CDT/PCB/Conditionnement), puis BDC, puis fiches
         const pcbFromStock = (stockItem.pcbStock && !isNaN(stockItem.pcbStock)) ? stockItem.pcbStock : null;
         const pcbFromBdc = bdcItem && bdcItem.pcb && !isNaN(bdcItem.pcb) ? bdcItem.pcb : null;
@@ -827,7 +854,7 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
         };
       })
       .sort((a, b) => a.produit.localeCompare(b.produit));
-  }, [stockRows, products, supplier, bdcByNormName]);
+  }, [stockRows, products, supplier, matchBdcItem]);
 
   const productAnalyses = useMemo(() => {
     return productsForSupplier.map(p => {
