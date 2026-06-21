@@ -188,10 +188,10 @@ const callApi = async (url, action, params = {}) => {
 const WD_SHORT = ['dim', 'lun', 'mar', 'mer', 'jeu', 'ven', 'sam'];
 const WD_LONG  = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
 
-// Date du jour de semaine `weekday` dans la semaine de `ref`, reculée de `weeksBack` semaines.
-const dateForWeekday = (ref, weekday, weeksBack) => {
-  const d = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate());
-  d.setDate(d.getDate() + (weekday - d.getDay()) - 7 * (weeksBack || 0));
+// Décale une date de `n` jours (n<0 = passé) sans souci d'heure d'été (construit via y/m/d).
+const shiftDays = (date, n) => {
+  const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  d.setDate(d.getDate() + n);
   return d;
 };
 
@@ -202,36 +202,40 @@ const salesToMap = (sales) => {
   return m;
 };
 
-// Somme des ventes pour un ensemble de JOURS DE VENTE (saleWeekdays = [3,4,5]
-// pour mer/jeu/ven), sur la semaine reculée de `weeksBack`.
-// On lit la colonne PRÉPA = jour de vente - 1.
-const periodSumForWeek = (salesMap, saleWeekdays, today, weeksBack) => {
+// Somme des ventes sur un ensemble de JOURS DE VENTE DATÉS
+// (coverSaleDates = ['2026-06-24','2026-06-25', …, '2026-07-01']), chacun reculé
+// de `weeksBack` périodes (7 j). On lit la colonne PRÉPA = veille du jour de vente.
+// ⚠️ On itère sur les DATES réelles, jamais sur des jours de semaine dédupliqués :
+// un même jour de semaine présent deux fois dans la fenêtre (mercredi de cette
+// semaine + mercredi de la suivante) est donc compté DEUX fois. C'est précisément
+// le jour de prépa qui manquait avant dans la référence.
+const periodSumForDates = (salesMap, coverSaleDates, weeksBack) => {
   let total = 0, found = 0;
   const detail = [];
-  saleWeekdays.forEach(sw => {
-    const prepWd = (sw + 6) % 7;                       // sw - 1 (modulo 7)
-    const prepDate = dateForWeekday(today, prepWd, weeksBack);
+  (coverSaleDates || []).forEach(ds => {
+    const saleDate0 = new Date(ds + 'T00:00:00');
+    const refSale = shiftDays(saleDate0, -7 * (weeksBack || 0)); // même jour, période -n
+    const prepDate = shiftDays(refSale, -1);                     // prépa = veille de la vente
     const key = fmtDate(prepDate);
     const has = Object.prototype.hasOwnProperty.call(salesMap, key);
     const q = has ? salesMap[key] : 0;
     if (has) found++;
     total += q;
-    const saleDate = new Date(prepDate.getTime() + 86400000); // vente = lendemain de la prépa
-    detail.push({ saleWd: sw, saleDate: fmtDate(saleDate), prepDate: key, q: q, has: has });
+    detail.push({ saleWd: saleDate0.getDay(), saleDate: fmtDate(refSale), prepDate: key, q: q, has: has });
   });
-  return { total: total, found: found, detail: detail, days: saleWeekdays.length, weeksBack: weeksBack };
+  return { total: total, found: found, detail: detail, days: (coverSaleDates || []).length, weeksBack: weeksBack };
 };
 
 // Analyse complète d'un produit sur des jours de vente donnés :
 //   - P-1 (semaine précédente, mêmes jours)
 //   - moyenne des 4 dernières périodes (mêmes jours)
 //   - mise à l'échelle si une semaine de réf a moins de jours présents que la couverture
-const analyzeProductDays = (sales, today, saleWeekdays) => {
+const analyzeProductDays = (sales, coverSaleDates) => {
   const salesMap = salesToMap(sales);
-  const coverDays = saleWeekdays.length || 1;
+  const coverDays = (coverSaleDates || []).length || 1;
   const periods = [];
-  for (let k = 1; k <= 4; k++) periods.push(periodSumForWeek(salesMap, saleWeekdays, today, k));
-  const current = periodSumForWeek(salesMap, saleWeekdays, today, 0); // semaine en cours (incomplète)
+  for (let k = 1; k <= 4; k++) periods.push(periodSumForDates(salesMap, coverSaleDates, k));
+  const current = periodSumForDates(salesMap, coverSaleDates, 0); // période en cours (future = incomplète)
 
   // "Mise à l'échelle" = ramener au nombre de jours à couvrir.
   // Ex : 20 ventes sur 2 jours présents → 10/j → pour 3 jours couverts = 30.
@@ -257,7 +261,7 @@ const analyzeProductDays = (sales, today, saleWeekdays) => {
     avg4: avg4Scaled, avg4Count: withData.length,
     ref: ref, refSource: refSource,
     trend: trend,
-    saleWeekdays: saleWeekdays,
+    coverSaleDates: coverSaleDates,
   };
 };
 
@@ -346,7 +350,7 @@ function Header({ step, dataStatus, stockDate }) {
   const steps = ['Tableau de bord', 'Fournisseur', 'Prédiction', 'Validation', 'Export'];
   return (
     <div className="card">
-      <h1>🥦 Kelbongoo – Prédiction Commandes</h1>
+      <h1>🥦 Kelbongoo – Prédiction Commandes <span style={{fontSize:12,color:'#a0aec0',fontWeight:400}}>· réf datée (build 21/06)</span></h1>
       <div className="subtitle">{fmtFR(new Date())}{stockDate && stockDate !== todayStr() && <span style={{color:'#dd6b20'}}> · ⚠️ Stock du {stockDate}</span>}</div>
       <div className="data-status">
         {Object.entries(dataStatus).map(([k, v]) => (
@@ -802,15 +806,8 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
     setCoverSaleDates(prev => prev.indexOf(ds) >= 0 ? prev.filter(x => x !== ds) : [...prev, ds].sort());
   };
 
-  // Jours de semaine de vente à couvrir (uniques, triés) → base des lectures P-1 / moy-4
-  const saleWeekdays = useMemo(() => {
-    const s = [];
-    coverSaleDates.forEach(ds => {
-      const wd = new Date(ds + 'T00:00:00').getDay();
-      if (s.indexOf(wd) < 0) s.push(wd);
-    });
-    return s.sort((a, b) => a - b);
-  }, [coverSaleDates]);
+  // (Plus de dédup par jour de semaine : la référence est désormais calculée
+  //  directement sur coverSaleDates, donc un jour de semaine répété compte plusieurs fois.)
 
   const [context, setContext] = useState('');
   const [selectedScenario, setSelectedScenario] = useState({});
@@ -939,14 +936,14 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
   const productAnalyses = useMemo(() => {
     return productsForSupplier.map(p => {
       const sales = salesByProduct[p.id] || [];
-      const stats = analyzeProductDays(sales, today, saleWeekdays);
+      const stats = analyzeProductDays(sales, coverSaleDates);
       const pcb = pcbOverrides[p.id] || p.pcb || 1;
       const adjCoef = computeAdjustment(p.id, learnings);
       const baseNeed = stats.ref; // ventes attendues sur les jours couverts (P-1, repli moy-4)
       const r = buildScenarios(baseNeed, p.stockEff, pcb, adjCoef);
       return { product: p, stats, ...r, pcb, adjCoef, baseNeed };
     });
-  }, [productsForSupplier, salesByProduct, today, saleWeekdays, pcbOverrides, learnings]);
+  }, [productsForSupplier, salesByProduct, coverSaleDates, pcbOverrides, learnings]);
 
   useEffect(() => {
     const def = {};
@@ -1022,15 +1019,15 @@ function StepPrediction({ supplier, data, learnings, onValidate, onBack, apiUrl 
                   borderRadius:8, padding:'6px 10px', cursor:'pointer', fontSize:12,
                   fontWeight:600, textAlign:'center', lineHeight:1.3,
                 }}>
-                {on ? '☑' : '☐'} {WD_SHORT[dd.getDay()]} {dd.getDate()}/{dd.getMonth()+1}
+                {on ? '☑' : '☐'} <span style={{fontSize:15}}>prépa {WD_SHORT[prep.getDay()]} {prep.getDate()}/{prep.getMonth()+1}</span>
                 <div style={{fontSize:10, fontWeight:400, color: on ? '#3182ce' : '#cbd5e0'}}>
-                  col. {WD_SHORT[prep.getDay()]} {prep.getDate()}
+                  → vente {WD_SHORT[dd.getDay()]} {dd.getDate()}
                 </div>
               </button>
             );
           })}
           <span className="small" style={{marginLeft:4}}>
-            {saleWeekdays.length} jour{saleWeekdays.length > 1 ? 's' : ''} de vente à couvrir
+            {coverSaleDates.length} jour{coverSaleDates.length > 1 ? 's' : ''} de vente à couvrir
           </span>
         </div>
         {infoCover && (() => {
